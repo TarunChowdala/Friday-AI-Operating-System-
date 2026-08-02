@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Reset ─── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+
+body {
+  background-color: #040404;
+  color: #e0f4ff;
+  font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,180,255,0.25); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,180,255,0.5); }
+
+/* ─── Glass ─── */
+.glass {
+  background: rgba(8, 12, 24, 0.5);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(0,180,255,0.1);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.glass-strong {
+  background: rgba(6, 9, 20, 0.75);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid rgba(0,180,255,0.12);
+  box-shadow: 0 12px 40px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+/* ─── Glow text ─── */
+.text-glow   { text-shadow: 0 0 20px rgba(0,180,255,0.75), 0 0 40px rgba(0,180,255,0.35); }
+.text-glow-sm { text-shadow: 0 0 10px rgba(0,180,255,0.65); }
+
+/* ─── Gradient text ─── */
+.gradient-text {
+  background: linear-gradient(135deg, #00b4ff 0%, #00e5ff 50%, #64a0ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ─── Shadows ─── */
+.shadow-glow-cyan { box-shadow: 0 0 18px rgba(0,180,255,0.35), 0 0 40px rgba(0,180,255,0.15); }
+.shadow-glow-sm   { box-shadow: 0 0 10px rgba(0,180,255,0.25); }
+
+/* ─── Nav item left bar ─── */
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 50%;
+  transform: translateY(-50%);
+  height: 55%; width: 2px;
+  background: linear-gradient(to bottom, transparent, #00b4ff, transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+  border-radius: 0 2px 2px 0;
+}
+.nav-item:hover::before { opacity: 0.5; }
+
+/* ─── Scanlines ─── */
+.scanlines::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom, transparent 0px, transparent 3px,
+    rgba(0,0,0,0.06) 3px, rgba(0,0,0,0.06) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ─── Flex center ─── */
+.flex-center { display: flex; align-items: center; justify-content: center; }
+
+/* ─── Custom color vars (mirrors Tailwind config) ─── */
+:root {
+  --friday-bg: #040404;
+  --friday-cyan: #00b4ff;
+  --friday-blue: #0066ff;
+  --friday-accent: #00e5ff;
+  --friday-text: #e0f4ff;
+  --friday-muted: rgba(180,220,255,0.5);
+  --friday-border: rgba(0,180,255,0.12);
+  --friday-surface: #0a0f1e;
+  --friday-success: #00ff88;
+  --friday-danger: #ff3366;
+  --friday-warning: #ffaa00;
+}
+
+/* ─── Framer Motion layout fixes ─── */
+[data-framer-appear-id] { will-change: transform, opacity; }
