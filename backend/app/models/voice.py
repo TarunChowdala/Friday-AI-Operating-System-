@@ -25,5 +25,6 @@ class TTSRequest(BaseModel):
 
 class TTSResponse(BaseModel):
     audio_url: Optional[str] = None
+    audio_data: Optional[bytes] = None
     format: str = "mp3"
     duration_ms: int = 0

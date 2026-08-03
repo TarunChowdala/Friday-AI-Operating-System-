@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "llama3.2"
+    OLLAMA_MODEL: str = "llama3.2:1b"
     EMBEDDING_MODEL: str = "nomic-embed-text"
 
     WHISPER_MODEL: str = "base"

@@ -1,12 +1,14 @@
 import { motion } from 'framer-motion';
 import StatusDisplay from '../components/StatusDisplay';
 import MicButton from '../components/Mic/MicButton';
-import DemoControls from '../components/DemoControls';
+import ChatInput from '../components/ChatInput';
 import { fadeIn } from '../animations/variants';
-
-
+import { useFridayWebSocket } from '../hooks/useFridayWebSocket';
+import { useFridayStore } from '../store/useFridayStore';
 
 export default function Home() {
+  const { aiResponse, sendText, startRecording, stopRecording } = useFridayWebSocket();
+  const assistantState = useFridayStore((s) => s.assistantState);
 
   return (
     <motion.main
@@ -34,23 +36,39 @@ export default function Home() {
 
       {/* ─── STATUS TEXT ─── */}
       <motion.div
-        className="flex-shrink-0 w-full flex justify-center"
+        className="flex-shrink-0 w-full flex flex-col items-center justify-center gap-6 mt-12"
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.7, delay: 0.5 }}
       >
         <StatusDisplay />
+        
+        {/* Dynamic AI Subtitles */}
+        {aiResponse && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="max-w-2xl text-center"
+          >
+            <p className="text-xl md:text-2xl text-friday-cyan font-light leading-relaxed text-shadow-sm">
+              "{aiResponse}"
+            </p>
+          </motion.div>
+        )}
       </motion.div>
 
-      {/* ─── MIC ─── */}
+      {/* ─── MIC & INPUT ─── */}
       <motion.div
-        className="flex-shrink-0 flex flex-col items-center gap-4"
+        className="flex-shrink-0 w-full flex flex-col items-center gap-4 z-20"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.7, delay: 0.7 }}
       >
-        <MicButton />
-        <DemoControls />
+        <MicButton onStart={startRecording} onStop={stopRecording} />
+        <ChatInput 
+          onSend={sendText} 
+          disabled={assistantState === 'thinking' || assistantState === 'speaking'} 
+        />
       </motion.div>
 
       {/* Bottom edge line */}

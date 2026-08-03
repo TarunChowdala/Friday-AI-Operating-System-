@@ -6,43 +6,46 @@ The backend system for **FRIDAY (Personal AI Assistant)**. Built for ultra-low l
 
 * **Framework:** FastAPI (Python)
 * **Real-time Comms:** WebSockets (Full Duplex)
-* **Database:** SQLite (via async SQLAlchemy)
-* **LLM Engine:** Ollama (Local - `qwen3:8b` / `llama3`)
+* **Agent Routing:** LangChain (Agent Router, Planner, Researcher)
+* **LLM Engine:** Ollama (Local - `llama3.2:1b` for ultra-fast CPU inference)
 * **Speech-to-Text (STT):** Whisper (`faster-whisper`)
-* **Text-to-Speech (TTS):** Kokoro TTS (Local, High-fidelity)
+* **Text-to-Speech (TTS):** Edge-TTS (Streamed, Sub-second latency)
+* **Web Search:** DuckDuckGo (via LangChain tools)
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture: Waterfall Streaming
 
-FRIDAY operates on a real-time, event-driven WebSocket architecture to eliminate the "Walkie-Talkie" latency of standard REST APIs.
+FRIDAY operates on a real-time, event-driven WebSocket architecture implementing **Waterfall Streaming** to eliminate "Walkie-Talkie" latency. 
+
+Instead of waiting for the full LLM response to generate, FRIDAY yields text chunk-by-chunk. When a sentence punctuation mark is detected, that exact sentence is instantly fired to the TTS engine and sent to the frontend for playback, while the LLM continues generating the *next* sentence in the background.
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant React Frontend (VAD)
+    participant React Frontend
     participant FastAPI WebSocket
-    participant Whisper (STT)
-    participant Ollama (LLM)
-    participant Kokoro (TTS)
+    participant Faster-Whisper (STT)
+    participant AgentRouter (LangChain)
+    participant Edge-TTS
 
-    User->>React Frontend (VAD): Speaks ("Hello Friday")
-    Note over React Frontend (VAD): VAD detects speech end
-    React Frontend (VAD)->>FastAPI WebSocket: Streams Audio Chunk
-    FastAPI WebSocket->>Whisper (STT): Transcribe Audio
-    Whisper (STT)-->>FastAPI WebSocket: Text ("Hello Friday")
-    FastAPI WebSocket->>Ollama (LLM): Send Prompt
-    Ollama (LLM)-->>FastAPI WebSocket: Streams Token ("Hello, sir.")
-    FastAPI WebSocket->>Kokoro (TTS): Synthesize Text
-    Kokoro (TTS)-->>FastAPI WebSocket: Streams Audio Buffer
-    FastAPI WebSocket-->>React Frontend (VAD): Streams Audio Playback
-    React Frontend (VAD)-->>User: Plays Audio
+    User->>React Frontend: Speaks (Microphone)
+    React Frontend->>FastAPI WebSocket: Streams Base64 Audio (WebM)
+    FastAPI WebSocket->>Faster-Whisper (STT): Transcribe Audio
+    Faster-Whisper (STT)-->>FastAPI WebSocket: Text ("What is the weather?")
+    FastAPI WebSocket->>AgentRouter (LangChain): Route Intent
+    
+    Note over AgentRouter (LangChain): Routes to ResearcherAgent
+    AgentRouter (LangChain)-->>FastAPI WebSocket: Yields chunks ("Let me search...")
+    FastAPI WebSocket->>Edge-TTS: Synthesize Sentence
+    Edge-TTS-->>React Frontend: Streams Audio Buffer
+    React Frontend-->>User: Plays Audio
 ```
 
 ### Key Workflow
-1. **Frontend VAD (Voice Activity Detection):** Prevents dead silence from being transmitted. Only human speech triggers an audio stream.
-2. **WebSocket Manager:** Keeps a persistent connection open between the React frontend and the FastAPI backend.
-3. **Voice Manager Pipeline:** Coordinates the hand-off between `Whisper` -> `Ollama` -> `Kokoro TTS` seamlessly.
+1. **Agent Router:** Dynamically routes user intent to specialized agents (Planner for chat, Researcher for web search, Executor for system tasks).
+2. **WebSocket Manager:** Keeps a persistent connection open between the React frontend and FastAPI.
+3. **Voice Manager Pipeline:** Coordinates the hand-off between `Whisper` -> `Ollama` -> `Edge-TTS` seamlessly.
 
 ---
 
@@ -51,18 +54,17 @@ sequenceDiagram
 ```text
 backend/
 ├── app/
-│   ├── agents/      # LLM logic, LangGraph/LangChain execution
-│   ├── api/         # REST API and WebSocket routers
-│   ├── core/        # Config (.env), Logging, Startup Events
+│   ├── agents/      # LLM logic (Router, Planner, Researcher)
+│   ├── api/         # REST API and WebSocket routes
+│   ├── core/        # Config (.env), Logging, Centralized LLM Factory
 │   ├── database/    # SQLite/SQLAlchemy setup & models
 │   ├── managers/    # Voice & Chat orchestrators
-│   ├── memory/      # Conversation history & Vector embeddings
-│   ├── services/    # Wrappers for Whisper, Ollama, TTS
-│   ├── tools/       # Tools FRIDAY can use (Search, System Control)
-│   └── websocket/   # Connection tracking & event broadcasting
-├── storage/         # Local DB (.db) and audio caches (Ignored by Git)
+│   ├── services/    # Wrappers for Whisper and Edge-TTS
+│   ├── tools/       # LangChain Tools (DuckDuckGo Search)
+│   └── websocket/   # Connection tracking & streaming logic
 ├── tests/           # Unit & Integration testing
-├── .env             # Environment variables
+├── test_client.py   # Terminal testing script for Mic and Audio
+├── requirements.txt # Python dependencies
 └── main.py          # Uvicorn entry point
 ```
 
@@ -72,15 +74,15 @@ backend/
 
 **1. Setup Environment**
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-pip install langchain-ollama  # Required for local models
+pip install duckduckgo-search langchain-community sounddevice scipy
 ```
 
 **2. Ensure Local AI is Running**
 * Have **Ollama** installed and running on `http://localhost:11434`
-* Ensure your model is pulled: `ollama run qwen2.5:8b` (or your preferred model)
+* Ensure your fast model is pulled: `ollama run llama3.2:1b`
 
 **3. Start the Server**
 ```bash

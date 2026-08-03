@@ -7,3 +7,12 @@ python-multipart>=0.0.12
 sqlalchemy[asyncio]>=2.0.36
 aiosqlite>=0.20.0
 websockets>=13.0
+
+# LLM & AI Agents
+langchain-ollama>=0.2.0
+
+# Speech to Text (Faster-Whisper)
+faster-whisper>=1.0.0
+
+# Text to Speech (Edge-TTS)
+edge-tts>=0.4.0

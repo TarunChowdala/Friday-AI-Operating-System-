@@ -69,25 +69,34 @@ function ThinkingArc() {
   );
 }
 
-export default function MicButton() {
+export default function MicButton({ onStart, onStop }: { onStart?: () => void, onStop?: () => void }) {
   const { assistantState, isMicActive, toggleMic } = useFridayStore();
   const isListening = assistantState === 'listening';
   const isThinking = assistantState === 'thinking';
   const isSpeaking = assistantState === 'speaking';
   const isActive = isMicActive || isListening || isSpeaking;
 
+  const handleToggle = () => {
+    if (!isMicActive) {
+      onStart?.();
+    } else {
+      onStop?.();
+    }
+    toggleMic();
+  };
+
   const buttonClass = isListening
     ? 'bg-friday-cyan/18 border-2 border-friday-cyan shadow-glow-cyan'
     : isThinking
-    ? 'bg-yellow-400/12 border-2 border-yellow-400/70'
-    : isSpeaking
-    ? 'bg-friday-success/12 border-2 border-friday-success/70'
-    : 'bg-friday-surface/60 border-2 border-friday-border hover:border-friday-cyan/40 hover:bg-friday-cyan/8';
+      ? 'bg-yellow-400/12 border-2 border-yellow-400/70'
+      : isSpeaking
+        ? 'bg-friday-success/12 border-2 border-friday-success/70'
+        : 'bg-friday-surface/60 border-2 border-friday-border hover:border-friday-cyan/40 hover:bg-friday-cyan/8';
 
   const iconColor = isListening ? 'text-friday-cyan drop-shadow-[0_0_8px_rgba(0,180,255,0.9)]'
     : isThinking ? 'text-yellow-400'
-    : isSpeaking ? 'text-friday-success'
-    : 'text-friday-muted';
+      : isSpeaking ? 'text-friday-success'
+        : 'text-friday-muted';
 
   return (
     <div className="flex flex-col items-center gap-5">
@@ -111,7 +120,7 @@ export default function MicButton() {
 
         <motion.button
           id="mic-main-btn"
-          onClick={toggleMic}
+          onClick={handleToggle}
           className={`relative w-[76px] h-[76px] rounded-full flex-center z-10 cursor-pointer transition-colors duration-300 ${buttonClass}`}
           whileHover={{ scale: 1.06 }}
           whileTap={{ scale: 0.93 }}
@@ -156,9 +165,8 @@ export default function MicButton() {
 
       {/* Label */}
       <motion.p
-        className={`text-[10px] font-mono tracking-widest ${
-          isListening ? 'text-friday-cyan' : isThinking ? 'text-yellow-400' : isSpeaking ? 'text-friday-success' : 'text-friday-muted/50'
-        }`}
+        className={`text-[10px] font-mono tracking-widest ${isListening ? 'text-friday-cyan' : isThinking ? 'text-yellow-400' : isSpeaking ? 'text-friday-success' : 'text-friday-muted/50'
+          }`}
         animate={{ opacity: [0.7, 1, 0.7] }}
         transition={{ duration: 2.5, repeat: Infinity }}
       >
