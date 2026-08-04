@@ -10,6 +10,11 @@ websockets>=13.0
 
 # LLM & AI Agents
 langchain-ollama>=0.2.0
+langchain-google-genai>=1.0.0
+langchain-groq>=0.2.0
+groq>=0.9.0
+
+
 
 # Speech to Text (Faster-Whisper)
 faster-whisper>=1.0.0

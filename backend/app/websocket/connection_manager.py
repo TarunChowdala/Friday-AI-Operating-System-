@@ -24,7 +24,12 @@ class ConnectionManager:
     async def send(self, client_id: str, message: dict) -> None:
         ws = self.active.get(client_id)
         if ws:
-            await ws.send_json(message)
+            try:
+                await ws.send_json(message)
+            except Exception as e:
+                logger.warning("Failed to send WS message to %s: %s", client_id, e)
+                self.disconnect(client_id)
+
 
     async def broadcast(self, message: dict) -> None:
         for client_id in list(self.active):

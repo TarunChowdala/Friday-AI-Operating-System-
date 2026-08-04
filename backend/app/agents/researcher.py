@@ -14,13 +14,13 @@ class ResearcherAgent:
         
         self.prompt = PromptTemplate.from_template(
             "You are FRIDAY, a highly intelligent personal AI assistant.\n"
-            "You must refer to the user as 'Boss'.\n"
             "Answer the user's question using the provided Web Search Results.\n"
             "Keep your response concise, conversational, and direct.\n\n"
             "Search Results:\n{search_results}\n\n"
-            "Boss: {task}\n"
+            "User: {task}\n"
             "FRIDAY:"
         )
+
         self.chain = self.prompt | self.llm
 
     async def run(self, task: str, context: Dict[str, Any] | None = None) -> Dict[str, Any]:

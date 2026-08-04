@@ -12,6 +12,7 @@ function Waveform({ active }: { active: boolean }) {
           key={i}
           className="rounded-full"
           style={{
+            height: '100%',
             width: '2.5px',
             background: 'linear-gradient(to top, #0066ff, #00b4ff, #00e5ff)',
           }}
@@ -29,7 +30,6 @@ function Waveform({ active }: { active: boolean }) {
             ease: 'easeInOut',
             delay: (i / bars) * 0.25,
           } : { duration: 0.4 }}
-          style={{ height: '100%', width: '2.5px', background: 'linear-gradient(to top, #0066ff, #00b4ff, #00e5ff)' }}
         />
       ))}
     </div>
@@ -77,10 +77,10 @@ export default function MicButton({ onStart, onStop }: { onStart?: () => void, o
   const isActive = isMicActive || isListening || isSpeaking;
 
   const handleToggle = () => {
-    if (!isMicActive) {
-      onStart?.();
-    } else {
-      onStop?.();
+    if (onStart || onStop) {
+      if (!isMicActive) onStart?.();
+      else onStop?.();
+      return;
     }
     toggleMic();
   };

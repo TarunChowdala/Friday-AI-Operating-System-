@@ -1,78 +1,45 @@
 import { motion } from 'framer-motion';
 import StatusDisplay from '../components/StatusDisplay';
 import MicButton from '../components/Mic/MicButton';
-import ChatInput from '../components/ChatInput';
+import AIScene from '../components/AI/AIScene';
+import DemoControls from '../components/DemoControls';
 import { fadeIn } from '../animations/variants';
 import { useFridayWebSocket } from '../hooks/useFridayWebSocket';
 import { useFridayStore } from '../store/useFridayStore';
 
 export default function Home() {
-  const { aiResponse, sendText, startRecording, stopRecording } = useFridayWebSocket();
+  const { toggleMic } = useFridayWebSocket();
   const assistantState = useFridayStore((s) => s.assistantState);
 
   return (
     <motion.main
-      className="flex-1 flex flex-col items-center justify-between py-6 px-4 relative overflow-hidden min-h-0"
+      className="flex-1 flex flex-col items-center relative overflow-hidden min-h-0 bg-[#050505]"
       variants={fadeIn}
       initial="hidden"
       animate="visible"
     >
-      {/* Background grid */}
-      <div
-        className="absolute inset-0 pointer-events-none opacity-40"
-        style={{
-          backgroundImage: 'linear-gradient(rgba(0,180,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,180,255,0.04) 1px, transparent 1px)',
-          backgroundSize: '48px 48px',
-        }}
-      />
-
-      {/* Radial gradient center bloom */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{ background: 'radial-gradient(ellipse at 50% 46%, rgba(0,100,255,0.07) 0%, transparent 65%)' }}
-      />
-
-      {/* HUD overlay */}
-
-      {/* ─── STATUS TEXT ─── */}
       <motion.div
-        className="flex-shrink-0 w-full flex flex-col items-center justify-center gap-6 mt-12"
-        initial={{ opacity: 0, y: 16 }}
+        className="absolute top-8 left-0 right-0 z-20 flex flex-col items-center gap-3 pointer-events-none"
+        initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.7, delay: 0.5 }}
+        transition={{ duration: 0.7, delay: 0.4 }}
       >
         <StatusDisplay />
-        
-        {/* Dynamic AI Subtitles */}
-        {aiResponse && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="max-w-2xl text-center"
-          >
-            <p className="text-xl md:text-2xl text-friday-cyan font-light leading-relaxed text-shadow-sm">
-              "{aiResponse}"
-            </p>
-          </motion.div>
-        )}
       </motion.div>
 
-      {/* ─── MIC & INPUT ─── */}
+      <div className="absolute inset-0 z-0">
+        <AIScene state={assistantState} />
+      </div>
+
       <motion.div
-        className="flex-shrink-0 w-full flex flex-col items-center gap-4 z-20"
+        className="absolute bottom-6 left-0 right-0 z-20 flex flex-col items-center gap-3"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.7, delay: 0.7 }}
+        transition={{ duration: 0.7, delay: 0.6 }}
       >
-        <MicButton onStart={startRecording} onStop={stopRecording} />
-        <ChatInput 
-          onSend={sendText} 
-          disabled={assistantState === 'thinking' || assistantState === 'speaking'} 
-        />
+        <DemoControls />
+        <MicButton onStart={toggleMic} onStop={toggleMic} />
       </motion.div>
-
-      {/* Bottom edge line */}
-      <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-friday-cyan/20 to-transparent" />
     </motion.main>
   );
 }

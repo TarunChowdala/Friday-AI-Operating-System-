@@ -13,7 +13,7 @@ class TTSService:
     def __init__(self) -> None:
         logger.info("Initializing Edge TTS Pipeline...")
         # 'en-US-AriaNeural' is a highly realistic, crisp female voice from Microsoft
-        self.default_voice = "en-US-JennyNeural" 
+        self.default_voice = "en-US-AvaNeural" 
         logger.info("Edge TTS loaded successfully!")
 
     async def synthesize(self, request: TTSRequest) -> TTSResponse:

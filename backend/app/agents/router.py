@@ -1,7 +1,6 @@
 """Routes tasks to the right agent using Ollama."""
 from typing import Any, Dict
 
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -35,17 +34,20 @@ class AgentRouter:
         # Setup the LangChain routing pipeline
         prompt = PromptTemplate.from_template(
             "You are the central routing brain for a personal AI assistant named FRIDAY.\n"
-            "Given the user's task, decide which specialized agent is best suited to handle it.\n\n"
-            "Available Agents:\n"
-            "- planner: For general questions, casual chatting, or creating step-by-step plans.\n"
-            "- researcher: For web searches, finding facts, or reading documentation.\n"
-            "- coder: For writing, refactoring, explaining, or fixing code.\n"
-            "- executor: For running terminal commands, scripts, or modifying local system files.\n"
-            "- critic: For reviewing code or evaluating complex logic.\n\n"
+            "Given the user's task or phrase, decide which specialized agent is best suited to handle it.\n\n"
+            "Strict Routing Rules:\n"
+            "- planner: DEFAULT AGENT. Use for ALL casual conversation, greetings (e.g. 'hello', 'how are you', 'I love red', 'tell me a joke', 'what's up'), general advice, opinions, chatting, or planning.\n"
+            "- executor: Use ONLY when the user gives a direct system command to open an app, open a URL, play YouTube, change volume, pause/play media, inspect/read screen ('what can you see on screen'), copy/paste clipboard, or run terminal commands.\n"
+            "- researcher: Use ONLY when the user asks a real-time factual query requiring live web search (e.g. 'latest news on AI', 'current stock price of Google', 'who won yesterday's game'). DO NOT use for casual phrases.\n"
+            "- coder: Use ONLY when writing, refactoring, explaining, or debugging programming code.\n"
+            "- critic: Use ONLY for evaluating complex logic or code reviews.\n\n"
             "Task: {task}\n\n"
-            "Respond with exactly ONE word (the agent name) from the list above. Do not add punctuation or explanation."
+            "Respond with exactly ONE word (the agent name) from the list above. Do not add any punctuation, quotes, or explanation."
+
         )
         self.router_chain = prompt | self.llm | StrOutputParser()
+
+
 
     async def route(self, task: str) -> str:
         """Uses Ollama to smartly determine which agent should handle the task."""

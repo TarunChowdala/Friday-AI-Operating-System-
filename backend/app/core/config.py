@@ -18,6 +18,11 @@ class Settings(BaseSettings):
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2:1b"
+    GROQ_API_KEY: str | None = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GEMINI_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
+
     EMBEDDING_MODEL: str = "nomic-embed-text"
 
     WHISPER_MODEL: str = "base"
