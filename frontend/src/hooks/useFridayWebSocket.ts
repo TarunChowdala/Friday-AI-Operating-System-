@@ -1,44 +1,77 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useFridayStore } from '../store/useFridayStore';
 
+/**
+ * Flow (header mic):
+ *
+ * 1. Click mic ON  → state: listening  (recorder + VAD start)
+ * 2. You talk      → VAD marks speech
+ * 3. You stop      → 900ms silence → audio sent to backend
+ * 4. Backend STT   → state: thinking
+ * 5. TTS chunks    → state: speaking  (sphere turns yellow)
+ * 6. Playback done → state: listening again (mic still on)
+ *
+ * Click mic OFF anytime → state: idle, recorder killed
+ */
 export function useFridayWebSocket() {
   const ws = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
 
   const setAssistantState = useFridayStore((s) => s.setAssistantState);
 
-  // Audio queue for smooth playback
   const audioQueue = useRef<AudioBuffer[]>([]);
   const isPlaying = useRef(false);
 
-  // Mic & Silence Detection State
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const audioChunks = useRef<Blob[]>([]);
-  const isMicEnabled = useRef<boolean>(false);
+  const isMicEnabled = useRef(false);
+  const mediaStream = useRef<MediaStream | null>(null);
 
   const analyser = useRef<AnalyserNode | null>(null);
   const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isSpeaking = useRef<boolean>(false);
+  const vadInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isSpeaking = useRef(false);
+  const startListeningRef = useRef<() => Promise<void>>(async () => {});
 
-  // Playback queue handler
+  const clearVad = () => {
+    if (vadInterval.current) {
+      clearInterval(vadInterval.current);
+      vadInterval.current = null;
+    }
+    if (silenceTimer.current) {
+      clearTimeout(silenceTimer.current);
+      silenceTimer.current = null;
+    }
+  };
+
+  const stopTracks = () => {
+    mediaStream.current?.getTracks().forEach((t) => t.stop());
+    mediaStream.current = null;
+  };
+
   const playNextInQueue = useCallback(async () => {
     if (audioQueue.current.length === 0) {
       isPlaying.current = false;
-      setAssistantState('listening'); // Instantly back to listening!
-
-      // Re-arm mic recording after AI finishes speaking
       if (isMicEnabled.current) {
+        setAssistantState('listening');
         setTimeout(() => {
           if (!isPlaying.current && isMicEnabled.current) {
-            startListening();
+            startListeningRef.current();
           }
-        }, 200);
+        }, 250);
+      } else {
+        setAssistantState('idle');
       }
       return;
     }
 
     isPlaying.current = true;
     setAssistantState('speaking');
+
+    // Resume context — browsers suspend until a user gesture / resume
+    if (audioContext.current?.state === 'suspended') {
+      await audioContext.current.resume();
+    }
 
     const buffer = audioQueue.current.shift()!;
     const source = audioContext.current!.createBufferSource();
@@ -48,17 +81,21 @@ export function useFridayWebSocket() {
     source.start(0);
   }, [setAssistantState]);
 
-  // Connect WebSocket & AudioContext
   useEffect(() => {
     audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     const clientId = 'browser_client_' + Math.floor(Math.random() * 1000);
     let reconnectTimeout: ReturnType<typeof setTimeout>;
+    let closed = false;
 
     const connect = () => {
+      if (closed) return;
       const socket = new WebSocket(`ws://localhost:8000/ws/${clientId}`);
       ws.current = socket;
 
-      socket.onopen = () => console.log('✅ Connected to FRIDAY WebSocket');
+      socket.onopen = () => {
+        console.log('✅ Connected to FRIDAY WebSocket');
+        useFridayStore.setState({ isConnected: true });
+      };
 
       socket.onmessage = async (event) => {
         const data = JSON.parse(event.data);
@@ -66,6 +103,7 @@ export function useFridayWebSocket() {
 
         switch (msgType) {
           case 'transcription':
+            console.log('📝 Transcription:', payload);
             setAssistantState('thinking');
             break;
 
@@ -78,50 +116,72 @@ export function useFridayWebSocket() {
               }
               const audioBuf = await audioContext.current!.decodeAudioData(bytes.buffer);
               audioQueue.current.push(audioBuf);
-
-              if (!isPlaying.current) {
-                playNextInQueue();
-              }
+              if (!isPlaying.current) playNextInQueue();
             } catch (err) {
-              console.error("Audio decode error", err);
+              console.error('Audio decode error', err);
             }
+            break;
+
+          case 'error':
+            console.error('WS error payload:', payload);
+            setAssistantState(isMicEnabled.current ? 'listening' : 'idle');
             break;
         }
       };
 
       socket.onerror = (err) => console.error('WebSocket Error:', err);
       socket.onclose = () => {
-        reconnectTimeout = setTimeout(connect, 3000);
+        useFridayStore.setState({ isConnected: false });
+        if (!closed) reconnectTimeout = setTimeout(connect, 3000);
       };
     };
 
     connect();
 
     return () => {
-      clearTimeout(reconnectTimeout);
+      closed = true;
+      clearTimeout(reconnectTimeout!);
+      clearVad();
+      stopTracks();
       if (ws.current) ws.current.close();
       if (audioContext.current) audioContext.current.close();
     };
   }, [playNextInQueue, setAssistantState]);
 
-  // Microphone recording with intelligent 900ms silence detection
   const startListening = useCallback(async () => {
     try {
       if (mediaRecorder.current && mediaRecorder.current.state === 'recording') return;
+      if (isPlaying.current) return;
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      clearVad();
 
-      // Setup Web Audio VAD Analyser
+      if (audioContext.current?.state === 'suspended') {
+        await audioContext.current.resume();
+      }
       if (!audioContext.current) {
         audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      mediaStream.current = stream;
+
       const sourceNode = audioContext.current.createMediaStreamSource(stream);
       const analyserNode = audioContext.current.createAnalyser();
-      analyserNode.fftSize = 256;
+      analyserNode.fftSize = 512;
+      analyserNode.smoothingTimeConstant = 0.5;
       sourceNode.connect(analyserNode);
       analyser.current = analyserNode;
 
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+      const recorder = new MediaRecorder(stream, { mimeType: mime });
       mediaRecorder.current = recorder;
       audioChunks.current = [];
 
@@ -130,96 +190,122 @@ export function useFridayWebSocket() {
       };
 
       recorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunks.current, { type: 'audio/webm' });
+        clearVad();
+        const audioBlob = new Blob(audioChunks.current, { type: mime });
+        audioChunks.current = [];
+        stopTracks();
+        mediaRecorder.current = null;
 
-        // Only submit if user actually spoke (audio size > 2500 bytes)
-        if (audioBlob.size > 2500 && ws.current && ws.current.readyState === WebSocket.OPEN) {
+        // Mic was turned off — don't submit / re-arm
+        if (!isMicEnabled.current || isPlaying.current) return;
+
+        console.log(`🎙️ Slice size: ${audioBlob.size} bytes`);
+
+        if (audioBlob.size > 1500 && ws.current?.readyState === WebSocket.OPEN) {
           const buffer = await audioBlob.arrayBuffer();
           const bytes = new Uint8Array(buffer);
           let binary = '';
-          bytes.forEach((b) => binary += String.fromCharCode(b));
+          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
           const base64 = window.btoa(binary);
 
           setAssistantState('thinking');
+          console.log('📤 Sending audio to FRIDAY...');
           ws.current.send(JSON.stringify({ type: 'audio', data: base64 }));
         } else {
-          // Re-arm listening if slice was silent noise
+          console.log('🔇 Slice too small / WS closed — re-arming listen');
           if (isMicEnabled.current && !isPlaying.current) {
-            startListening();
+            startListeningRef.current();
           }
         }
-        stream.getTracks().forEach((track) => track.stop());
       };
 
       recorder.start(100);
       isMicEnabled.current = true;
+      isSpeaking.current = false;
       setAssistantState('listening');
       useFridayStore.setState({ isMicActive: true });
+      console.log('🎧 Listening...');
 
-      // Check audio volume every 50ms for 900ms silence window
       const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
-      isSpeaking.current = false;
+      const SPEECH_THRESHOLD = 12; // avg frequency energy
+      const SILENCE_MS = 900;
+      const MAX_UTTERANCE_MS = 12000;
+      const startedAt = Date.now();
 
-      const vadLoop = setInterval(() => {
-        if (isPlaying.current) {
-          clearInterval(vadLoop);
+      vadInterval.current = setInterval(() => {
+        if (isPlaying.current || !mediaRecorder.current || mediaRecorder.current.state !== 'recording') {
+          clearVad();
+          return;
+        }
+
+        // Hard cap utterance length
+        if (Date.now() - startedAt > MAX_UTTERANCE_MS && isSpeaking.current) {
+          console.log('⏱️ Max utterance — submitting');
+          clearVad();
+          mediaRecorder.current.stop();
           return;
         }
 
         analyserNode.getByteFrequencyData(dataArray);
-        let maxVolume = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          if (dataArray[i] > maxVolume) maxVolume = dataArray[i];
-        }
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+        const avg = sum / dataArray.length;
 
-        // Voice detection threshold
-        if (maxVolume > 20) {
+        if (avg > SPEECH_THRESHOLD) {
           if (!isSpeaking.current) {
-            console.log("🗣️ Speaking...");
+            console.log('🗣️ Speech detected');
             isSpeaking.current = true;
           }
-          if (silenceTimer.current) clearTimeout(silenceTimer.current);
-        } else {
-          // If user started speaking and then stopped for 900ms -> SUBMIT!
-          if (isSpeaking.current && !silenceTimer.current) {
-            silenceTimer.current = setTimeout(() => {
-              console.log("🔇 Sentence finished (900ms silence). Answering...");
-              clearInterval(vadLoop);
-              isSpeaking.current = false;
-              silenceTimer.current = null;
-              if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
-                mediaRecorder.current.stop();
-              }
-            }, 900); // 900ms gives plenty of time to pause mid-sentence naturally!
+          if (silenceTimer.current) {
+            clearTimeout(silenceTimer.current);
+            silenceTimer.current = null;
           }
+        } else if (isSpeaking.current && !silenceTimer.current) {
+          silenceTimer.current = setTimeout(() => {
+            console.log('🔇 Silence 900ms — submitting');
+            silenceTimer.current = null;
+            isSpeaking.current = false;
+            clearVad();
+            if (mediaRecorder.current?.state === 'recording') {
+              mediaRecorder.current.stop();
+            }
+          }, SILENCE_MS);
         }
       }, 50);
-
     } catch (err) {
-      console.error("Mic access error:", err);
+      console.error('Mic access error:', err);
+      isMicEnabled.current = false;
       setAssistantState('idle');
       useFridayStore.setState({ isMicActive: false });
     }
   }, [setAssistantState]);
 
-  // Toggle Mic Button handler (Mute / Unmute)
-  const toggleMic = () => {
+  startListeningRef.current = startListening;
+
+  const toggleMic = useCallback(async () => {
+    if (audioContext.current?.state === 'suspended') {
+      await audioContext.current.resume();
+    }
+
     if (isMicEnabled.current) {
+      // Turn OFF
+      console.log('🎤 Mic OFF');
       isMicEnabled.current = false;
-      if (silenceTimer.current) clearTimeout(silenceTimer.current);
-      if (mediaRecorder.current && mediaRecorder.current.state === 'recording') {
+      clearVad();
+      if (mediaRecorder.current?.state === 'recording') {
         mediaRecorder.current.stop();
+      } else {
+        stopTracks();
       }
       useFridayStore.setState({ isMicActive: false });
       setAssistantState('idle');
     } else {
+      // Turn ON
+      console.log('🎤 Mic ON');
       isMicEnabled.current = true;
-      startListening();
+      await startListening();
     }
-  };
+  }, [setAssistantState, startListening]);
 
-  return {
-    toggleMic,
-    isMicActive: isMicEnabled.current
-  };
+  return { toggleMic };
 }

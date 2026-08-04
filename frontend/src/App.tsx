@@ -16,7 +16,7 @@ export default function App() {
       <TopBar />
 
       <motion.div
-        className="flex-1 min-h-0 relative z-10"
+        className="flex-1 min-h-0 w-full relative z-10"
         initial={{ opacity: 0 }}
         animate={{ opacity: isBooted ? 1 : 0 }}
         transition={{ duration: 0.8, ease: 'easeOut' }}

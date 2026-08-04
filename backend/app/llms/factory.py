@@ -43,7 +43,7 @@ def get_llm(purpose: str = "default", temperature: float = 0.7) -> Any:
             logger.warning("langchain-google-genai not installed. Falling back to local model.")
 
     # 1. Groq Integration (Ultra-fast 800+ tokens/sec cloud LLM)
-    if False:
+    if True:
         try:
             from langchain_groq import ChatGroq
             logger.info(f"Factory routing '{purpose}' to Groq Cloud ({cfg.GROQ_MODEL})")

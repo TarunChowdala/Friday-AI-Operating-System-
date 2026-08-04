@@ -1,16 +1,18 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { Settings, Mic, MicOff, Wifi, WifiOff, Activity, Cpu, Volume2, VolumeX } from 'lucide-react';
 import { useFridayStore } from '../../store/useFridayStore';
+import { useFridayWebSocket } from '../../hooks/useFridayWebSocket';
 
 const stateConfig = {
   idle: { label: 'STANDBY', color: 'text-friday-muted', dot: 'bg-friday-muted/50' },
-  listening: { label: 'ACTIVE LISTEN', color: 'text-friday-cyan', dot: 'bg-friday-cyan' },
-  thinking: { label: 'PROCESSING', color: 'text-yellow-400', dot: 'bg-yellow-400' },
-  speaking: { label: 'SYNTHESIZING', color: 'text-friday-success', dot: 'bg-friday-success' },
+  listening: { label: 'ACTIVE LISTEN', color: 'text-[#00D4FF]', dot: 'bg-[#00D4FF]' },
+  thinking: { label: 'PROCESSING', color: 'text-[#7A5FFF]', dot: 'bg-[#7A5FFF]' },
+  speaking: { label: 'SYNTHESIZING', color: 'text-[#FF8A00]', dot: 'bg-[#FF8A00]' },
 };
 
 export default function TopBar() {
-  const { assistantState, isMicActive, isMuted, isConnected, toggleMic, toggleMute } = useFridayStore();
+  const { assistantState, isMicActive, isMuted, isConnected, toggleMute } = useFridayStore();
+  const { toggleMic } = useFridayWebSocket();
   const cfg = stateConfig[assistantState];
 
   return (
