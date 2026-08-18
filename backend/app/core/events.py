@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.logger import get_logger
+from app.core.redis_client import close_redis, ping_redis
 from app.database.database import init_db
 
 logger = get_logger(__name__)
@@ -15,7 +16,7 @@ async def on_startup() -> None:
     # 1. Validate configuration & Initialize paths
     for path in (cfg.LOGS_PATH, cfg.UPLOADS_PATH, cfg.CONVERSATIONS_PATH, cfg.VECTOR_STORE_PATH):
         Path(path).mkdir(parents=True, exist_ok=True)
-    logger.info("FRIDAY backend starting — v%s", cfg.APP_VERSION)
+    logger.info("JARVIS backend starting — v%s", cfg.APP_VERSION)
     
     # 2. Initialize Database
     logger.info("Initializing Database...")
@@ -24,8 +25,18 @@ async def on_startup() -> None:
         logger.info("Database initialized successfully.")
     except Exception as e:
         logger.error("Database init failed: %s", e)
+
+    # 3. Redis (live session store)
+    logger.info("Checking Redis at %s ...", cfg.REDIS_URL)
+    try:
+        if await ping_redis():
+            logger.info("Redis is ready (live Session Manager).")
+        else:
+            logger.error("Redis ping returned false.")
+    except Exception as e:
+        logger.error("Failed to connect to Redis: %s", e)
         
-    # 3. Verify Ollama server is running
+    # 4. Verify Ollama server is running
     logger.info("Checking Ollama server status...")
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -38,14 +49,14 @@ async def on_startup() -> None:
     except Exception as e:
         logger.error("Failed to connect to Ollama server at http://127.0.0.1:11434: %s", e)
 
-    # 4. Register available tools
+    # 5. Register available tools
     logger.info("Registering agent tools...")
     # TODO: Import and map tool classes
     
-    # 5. Initialize application state
+    # 6. Initialize application state
     logger.info("Application state initialized and ready.")
 
 
 async def on_shutdown() -> None:
-    logger.info("FRIDAY backend shutting down")
-    # TODO: flush memory, close WS connections, dispose DB
+    logger.info("JARVIS backend shutting down")
+    await close_redis()

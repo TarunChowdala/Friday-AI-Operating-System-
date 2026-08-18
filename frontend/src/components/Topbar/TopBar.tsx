@@ -24,7 +24,7 @@ export default function TopBar() {
     >
       {/* Left: Brand */}
       <div className="flex items-center gap-3 min-w-0">
-        <span className="text-sm font-bold tracking-[0.28em] gradient-text">FRIDAY</span>
+        <span className="text-sm font-bold tracking-[0.28em] gradient-text">JARVIS</span>
         <div className="w-px h-4 bg-friday-border/60" />
         <div className="flex items-center gap-1.5">
           <Cpu size={11} className="text-friday-muted/50" />

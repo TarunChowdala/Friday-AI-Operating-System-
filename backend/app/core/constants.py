@@ -1,6 +1,6 @@
 """Shared constants."""
 
-APP_NAME = "FRIDAY AI"
+APP_NAME = "JARVIS AI"
 APP_VERSION = "4.2.1"
 
 # AI states mirrored by frontend

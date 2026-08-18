@@ -2,6 +2,7 @@ from typing import List, Dict
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from app.core.logger import get_logger
 from app.core.llm import get_llm
+from app.prompts.system_prompt import get_system_prompt
 
 logger = get_logger(__name__)
 
@@ -15,11 +16,7 @@ class ConversationMemoryManager:
         self.summarizer_llm = get_llm(purpose="summarization", temperature=0.3)
         
     def _get_base_system_prompt(self, summary: str = "") -> SystemMessage:
-        base = (
-            "You are FRIDAY, an exceptionally intelligent, polite, and witty personal AI assistant.\n"
-            "Speak naturally, eloquently, and concisely.\n"
-            "You may occasionally address the user as 'Boss' or by title, but DO NOT overuse it in every response—use it sparingly and naturally."
-        )
+        base = get_system_prompt()
         if summary:
             base += f"\n\nHere is a summary of the earlier conversation:\n{summary}"
         return SystemMessage(content=base)
@@ -69,7 +66,7 @@ class ConversationMemoryManager:
                 "New conversation turns to incorporate:\n"
             )
             for m in messages_to_summarize:
-                role = "User" if isinstance(m, HumanMessage) else "FRIDAY"
+                role = "User" if isinstance(m, HumanMessage) else "JARVIS"
                 summary_prompt += f"{role}: {m.content}\n"
                 
             summary_prompt += "\nUpdate the summary to include the new information. Keep it concise."

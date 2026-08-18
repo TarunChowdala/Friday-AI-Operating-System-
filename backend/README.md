@@ -70,7 +70,29 @@ backend/
 
 ---
 
-## 💻 Quick Start
+## 🚀 One-command start (recommended)
+
+Backend runs **on the host** (so system controls work). Postgres + Redis start via Podman automatically.
+
+```bash
+cd backend
+chmod +x scripts/start.sh   # once
+./scripts/start.sh
+```
+
+That will:
+1. Create/start `friday-pg` (Postgres `:5432`)
+2. Create/start `friday-redis` (Redis `:6379`)
+3. Run `uvicorn` with `--reload` on `:8000`
+
+Endpoints:
+- Docs: http://localhost:8000/docs  
+- Health: http://localhost:8000/api/health/  
+- WebSocket: `ws://localhost:8000/ws/{client_id}`
+
+---
+
+## 💻 Manual Quick Start
 
 **1. Setup Environment**
 ```bash
@@ -80,16 +102,21 @@ pip install -r requirements.txt
 pip install duckduckgo-search langchain-community sounddevice scipy
 ```
 
-**2. Ensure Local AI is Running**
+**2. Infra** — use `./scripts/start.sh`, or start containers yourself:
+```bash
+podman start friday-pg friday-redis
+```
+
+**3. Ensure Local AI is Running**
 * Have **Ollama** installed and running on `http://localhost:11434`
 * Ensure your fast model is pulled: `ollama run llama3.2:1b`
 
-**3. Start the Server**
+**4. Start the Server**
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-**4. Endpoints**
+**5. Endpoints**
 - REST Docs: http://localhost:8000/docs
 - Health Check: http://localhost:8000/api/health/
 - WebSocket Endpoint: `ws://localhost:8000/ws/{client_id}`

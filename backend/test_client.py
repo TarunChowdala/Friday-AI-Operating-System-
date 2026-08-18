@@ -39,7 +39,7 @@ async def test_friday():
                 "data": audio_b64
             }
             
-            print("\nSending audio up to FRIDAY...\n")
+            print("\nSending audio up to JARVIS...\n")
             await websocket.send(json.dumps(message))
             
             # Listen for responses

@@ -33,7 +33,7 @@ class WhisperService:
             audio_stream, 
             beam_size=2, 
             language="en",
-            initial_prompt="FRIDAY, Youtube, Amazon, Spotify, Terminal, Chrome, Google, Tarun"
+            initial_prompt="JARVIS, Youtube, Amazon, Spotify, Terminal, Chrome, Google, Tarun"
         )
         segment_list = list(segments)
         full_text = " ".join([segment.text for segment in segment_list]).strip()
@@ -59,7 +59,7 @@ class WhisperService:
                     response_format="json",
                     language="en",
 
-                    prompt="FRIDAY, Youtube, Amazon, Spotify, Terminal, Chrome, Google, Tarun"
+                    prompt="JARVIS, Youtube, Amazon, Spotify, Terminal, Chrome, Google, Tarun"
                 )
                 duration_ms = int((time.time() - start_time) * 1000)
                 text = res.text.strip()

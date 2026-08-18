@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="FRIDAY AI",
+    title="JARVIS AI",
     description="Personal AI Operating System — Backend API",
     version="4.2.1",
     lifespan=lifespan,
@@ -53,4 +53,4 @@ app.include_router(websocket.router, prefix="/ws",            tags=["WebSocket"]
 
 @app.get("/")
 async def root():
-    return {"status": "online", "system": "FRIDAY AI OS", "version": "4.2.1"}
+    return {"status": "online", "system": "JARVIS AI OS", "version": "4.2.1"}

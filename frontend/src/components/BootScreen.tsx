@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useFridayStore, getGreeting } from '../store/useFridayStore';
 
 const bootSequence = [
-  { text: 'FRIDAY OS v4.2.1', delay: 200, type: 'title' },
+  { text: 'JARVIS OS v4.2.1', delay: 200, type: 'title' },
   { text: '─────────────────────────────────', delay: 700, type: 'divider' },
   { text: '▸ Initializing AI Core...', delay: 1000, type: 'info' },
   { text: '▸ Loading Memory Banks...', delay: 1600, type: 'info' },
@@ -97,7 +97,7 @@ export default function BootScreen() {
                 <div className="w-3 h-3 rounded-full bg-friday-success/60" />
               </div>
               <span className="flex-1 text-center text-[10px] font-mono text-friday-muted tracking-widest">
-                FRIDAY — SYSTEM TERMINAL
+                JARVIS — SYSTEM TERMINAL
               </span>
             </div>
 
@@ -149,7 +149,7 @@ export default function BootScreen() {
             animate={{ opacity: 1 }}
             transition={{ delay: 1 }}
           >
-            FRIDAY AI OPERATING SYSTEM • CLASSIFIED
+            JARVIS AI OPERATING SYSTEM • CLASSIFIED
           </motion.p>
         </motion.div>
       )}
