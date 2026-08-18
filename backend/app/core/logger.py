@@ -1,9 +1,16 @@
 """Centralized logging setup."""
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from app.core.config import get_settings
+
+
+class _MsFormatter(logging.Formatter):
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created)
+        return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{int(record.msecs):03d}"
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -16,10 +23,7 @@ def get_logger(name: str) -> logging.Logger:
     logger.setLevel(getattr(logging, cfg.LOG_LEVEL.upper(), logging.INFO))
     logger.propagate = False
 
-    fmt = logging.Formatter(
-        "[%(asctime)s] %(levelname)-8s %(name)s — %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    fmt = _MsFormatter("[%(asctime)s] %(levelname)-8s %(name)s — %(message)s")
 
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)

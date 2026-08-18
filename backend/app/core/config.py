@@ -47,6 +47,9 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    # Secret confirmation code for dangerous actions (spoken by user to approve)
+    CONFIRM_CODE: str = "7989"
+
 
 @lru_cache
 def get_settings() -> Settings:

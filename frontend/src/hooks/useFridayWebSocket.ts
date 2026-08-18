@@ -3,11 +3,87 @@ import { useFridayStore } from '../store/useFridayStore';
 
 /** Tunable VAD / endpointing (energy VAD — not Silero). */
 export const VAD_CONFIG = {
-  SPEECH_THRESHOLD: 22,
-  SILENCE_MS: 800, // was 1500 — still safe against premature cutoffs
+  /** Fallback if noise floor isn't ready yet. Speech-band energy, not all FFT bins. */
+  SPEECH_THRESHOLD: 28,
+  SILENCE_MS: 650,
   MAX_UTTERANCE_MS: 12000,
   VAD_POLL_MS: 50,
+  NOISE_CALIBRATE_MS: 400,
+  SPEECH_MARGIN: 16,
+  SILENCE_MARGIN: 7,
 } as const;
+
+function speechBandEnergy(analyserNode: AnalyserNode, dataArray: Uint8Array): number {
+  analyserNode.getByteFrequencyData(dataArray);
+  const sampleRate = analyserNode.context.sampleRate || 48000;
+  const binHz = sampleRate / analyserNode.fftSize;
+  const lo = Math.max(1, Math.floor(300 / binHz));
+  const hi = Math.min(dataArray.length - 1, Math.ceil(3400 / binHz));
+  let sum = 0;
+  let n = 0;
+  for (let i = lo; i <= hi; i++) {
+    sum += dataArray[i];
+    n++;
+  }
+  return n ? sum / n : 0;
+}
+
+export const PCM_SAMPLE_RATE = 16000;
+
+function floatToPcm16(input: Float32Array): Int16Array {
+  const out = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function downsample(input: Float32Array, inRate: number, outRate: number): Float32Array {
+  if (inRate === outRate) return input;
+  const ratio = inRate / outRate;
+  const outLen = Math.max(1, Math.floor(input.length / ratio));
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    out[i] = input[Math.min(input.length - 1, Math.floor(i * ratio))];
+  }
+  return out;
+}
+
+function concatInt16(chunks: Int16Array[]): Int16Array {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const out = new Int16Array(n);
+  let o = 0;
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
+  return out;
+}
+
+function int16ToBase64(samples: Int16Array): string {
+  const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return window.btoa(binary);
+}
+
+function pcm16ToAudioBuffer(
+  ctx: AudioContext,
+  payloadB64: string,
+  sampleRate: number
+): AudioBuffer {
+  const binary = window.atob(payloadB64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const n = Math.floor(bytes.byteLength / 2);
+  const buf = ctx.createBuffer(1, Math.max(n, 1), sampleRate);
+  const ch = buf.getChannelData(0);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+  return buf;
+}
 
 /**
  * Flow (header mic):
@@ -34,8 +110,9 @@ export function useFridayWebSocket() {
   /** True from user submit until ai_text_complete / interrupt — blocks premature mic re-arm between TTS chunks */
   const responseActive = useRef(false);
 
-  const mediaRecorder = useRef<MediaRecorder | null>(null);
-  const audioChunks = useRef<Blob[]>([]);
+  const pcmChunks = useRef<Int16Array[]>([]);
+  const pcmProcessor = useRef<ScriptProcessorNode | null>(null);
+  const isCapturing = useRef(false);
   const isMicEnabled = useRef(false);
   const mediaStream = useRef<MediaStream | null>(null);
 
@@ -48,6 +125,29 @@ export function useFridayWebSocket() {
   const isSpeaking = useRef(false);
   const startListeningRef = useRef<() => Promise<void>>(async () => {});
   const interruptRef = useRef<() => void>(() => {});
+  const turnClock = useRef<{
+    speechAt: number | null;
+    silenceAt: number | null;
+    sendAt: number | null;
+    firstText: boolean;
+    firstAudio: boolean;
+    firstPlayback: boolean;
+  }>({
+    speechAt: null,
+    silenceAt: null,
+    sendAt: null,
+    firstText: false,
+    firstAudio: false,
+    firstPlayback: false,
+  });
+
+  const feLatency = (label: string, extra = '') => {
+    const t = turnClock.current;
+    const now = Date.now();
+    const fromSend = t.sendAt != null ? `${now - t.sendAt}ms from WS send` : 'no send yet';
+    const net = extra ? ` | ${extra}` : '';
+    console.log(`⏱️ [FE LATENCY] ${label} | ${fromSend}${net}`);
+  };
 
   const clearVad = () => {
     if (vadInterval.current) {
@@ -110,6 +210,9 @@ export function useFridayWebSocket() {
     if (audioQueue.current.length === 0) {
       isPlaying.current = false;
       clearBargeIn();
+      if (turnClock.current.sendAt) {
+        feLatency('playback queue empty');
+      }
       // Turn audio drained — clear sticky response flag so mic can re-arm
       if (!responseActive.current || ignoreTts.current) {
         /* ok */
@@ -130,7 +233,8 @@ export function useFridayWebSocket() {
       return;
     }
 
-    if (!isPlaying.current) {
+    const wasIdle = !isPlaying.current;
+    if (wasIdle) {
       speakingStartedAt.current = Date.now();
     }
     isPlaying.current = true;
@@ -141,6 +245,13 @@ export function useFridayWebSocket() {
     }
 
     const buffer = audioQueue.current.shift()!;
+    if (wasIdle && !turnClock.current.firstPlayback) {
+      turnClock.current.firstPlayback = true;
+      feLatency(
+        'first playback start (heard)',
+        `buffer=${buffer.duration.toFixed(2)}s queue_left=${audioQueue.current.length}`
+      );
+    }
     const source = audioContext.current!.createBufferSource();
     currentSource.current = source;
     source.buffer = buffer;
@@ -257,12 +368,15 @@ export function useFridayWebSocket() {
         const { type: msgType, payload } = data;
 
         switch (msgType) {
-          case 'transcription':
+          case 'transcription': {
+            const net = typeof data.t_sent_ms === 'number' ? `net=${Date.now() - data.t_sent_ms}ms` : '';
+            feLatency('transcription', `${net} text="${payload}"`);
             console.log('📝 Transcription:', payload);
             ignoreTts.current = false;
             responseActive.current = true;
             setAssistantState('thinking');
             break;
+          }
 
           case 'interrupted':
             console.log('⛔ Backend interrupted:', payload);
@@ -271,6 +385,17 @@ export function useFridayWebSocket() {
             stopPlayback();
             break;
 
+          case 'ai_text_chunk': {
+            const net = typeof data.t_sent_ms === 'number' ? `net=${Date.now() - data.t_sent_ms}ms` : '';
+            if (!turnClock.current.firstText) {
+              turnClock.current.firstText = true;
+              feLatency('first text chunk', `${net} text="${payload}"`);
+            } else {
+              feLatency('text chunk', `${net} text="${payload}"`);
+            }
+            break;
+          }
+
           case 'ai_audio_chunk':
             if (ignoreTts.current) {
               console.log('⏭️ Dropping TTS chunk (interrupted)');
@@ -278,12 +403,34 @@ export function useFridayWebSocket() {
             }
             responseActive.current = true;
             try {
-              const binaryString = window.atob(payload);
-              const bytes = new Uint8Array(binaryString.length);
-              for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
+              const decodeT0 = Date.now();
+              const net = typeof data.t_sent_ms === 'number' ? Date.now() - data.t_sent_ms : null;
+              const fmt = (data.format as string) || 'mp3';
+              const rate = Number(data.sample_rate) || PCM_SAMPLE_RATE;
+              let audioBuf: AudioBuffer;
+              if (fmt === 'pcm_s16le' || fmt === 'pcm') {
+                audioBuf = pcm16ToAudioBuffer(audioContext.current!, payload, rate);
+              } else {
+                const binaryString = window.atob(payload);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+                }
+                audioBuf = await audioContext.current!.decodeAudioData(bytes.buffer);
               }
-              const audioBuf = await audioContext.current!.decodeAudioData(bytes.buffer);
+              const decodeMs = Date.now() - decodeT0;
+              if (!turnClock.current.firstAudio) {
+                turnClock.current.firstAudio = true;
+                feLatency(
+                  'first audio chunk',
+                  `fmt=${fmt} decode=${decodeMs}ms net=${net ?? '?'}ms bytes=${payload.length} dur=${audioBuf.duration.toFixed(2)}s`
+                );
+              } else {
+                feLatency(
+                  'audio chunk',
+                  `fmt=${fmt} decode=${decodeMs}ms net=${net ?? '?'}ms dur=${audioBuf.duration.toFixed(2)}s`
+                );
+              }
               if (ignoreTts.current) break;
               audioQueue.current.push(audioBuf);
               const wasIdle = !isPlaying.current;
@@ -296,7 +443,10 @@ export function useFridayWebSocket() {
             }
             break;
 
-          case 'ai_text_complete':
+          case 'ai_text_complete': {
+            const net = typeof data.t_sent_ms === 'number' ? `net=${Date.now() - data.t_sent_ms}ms` : '';
+            feLatency('ai_text_complete', `${net} reply="${payload}"`);
+            console.log('BOT RESPONSE:', payload);
             ignoreTts.current = false;
             responseActive.current = false;
             // Turn finished — re-arm mic if playback already drained
@@ -309,6 +459,7 @@ export function useFridayWebSocket() {
               }, 200);
             }
             break;
+          }
 
           case 'error':
             console.error('WS error payload:', payload);
@@ -341,7 +492,7 @@ export function useFridayWebSocket() {
 
   const startListening = useCallback(async () => {
     try {
-      if (mediaRecorder.current && mediaRecorder.current.state === 'recording') return;
+      if (isCapturing.current) return;
       // Between TTS chunks only — never block an explicit mic-on (responseActive cleared in toggleMic)
       if (responseActive.current && !isPlaying.current && audioQueue.current.length === 0) {
         // Stale flag after TTS: clear and continue
@@ -379,76 +530,98 @@ export function useFridayWebSocket() {
       sourceNode.connect(analyserNode);
       analyser.current = analyserNode;
 
-      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
-      const recorder = new MediaRecorder(stream, { mimeType: mime });
-      mediaRecorder.current = recorder;
-      audioChunks.current = [];
+      pcmChunks.current = [];
+      const proc = audioContext.current.createScriptProcessor(4096, 1, 1);
+      const mute = audioContext.current.createGain();
+      mute.gain.value = 0;
+      sourceNode.connect(proc);
+      proc.connect(mute);
+      mute.connect(audioContext.current.destination);
+      pcmProcessor.current = proc;
+      isCapturing.current = true;
+      proc.onaudioprocess = (ev) => {
+        if (!isCapturing.current) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        const inRate = audioContext.current?.sampleRate || 48000;
+        const ds = downsample(input, inRate, PCM_SAMPLE_RATE);
+        pcmChunks.current.push(new Int16Array(floatToPcm16(ds)));
+      };
 
       const SPEECH_THRESHOLD = VAD_CONFIG.SPEECH_THRESHOLD;
       const SILENCE_MS = VAD_CONFIG.SILENCE_MS;
       const MAX_UTTERANCE_MS = VAD_CONFIG.MAX_UTTERANCE_MS;
+      const NOISE_CALIBRATE_MS = VAD_CONFIG.NOISE_CALIBRATE_MS;
+      const SPEECH_MARGIN = VAD_CONFIG.SPEECH_MARGIN;
+      const SILENCE_MARGIN = VAD_CONFIG.SILENCE_MARGIN;
 
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunks.current.push(e.data);
-      };
-
-      // Timing for this listen slice (speech → silence → WS send)
       let speechStartedAt: number | null = null;
       let silenceStartedAt: number | null = null;
       let submitReason: 'silence' | 'max_utterance' | 'unknown' = 'unknown';
+      let submitted = false;
 
-      recorder.onstop = async () => {
+      const stopCapture = () => {
+        isCapturing.current = false;
+        try {
+          pcmProcessor.current?.disconnect();
+        } catch {
+          /* already disconnected */
+        }
+        pcmProcessor.current = null;
+        stopTracks();
+      };
+
+      const submitUtterance = () => {
+        if (submitted) return;
+        submitted = true;
         clearVad();
         const stoppedAt = Date.now();
-        const audioBlob = new Blob(audioChunks.current, { type: mime });
-        audioChunks.current = [];
-        stopTracks();
-        mediaRecorder.current = null;
+        const samples = concatInt16(pcmChunks.current);
+        pcmChunks.current = [];
+        stopCapture();
 
         if (!isMicEnabled.current) return;
 
         const speakMs = speechStartedAt ? stoppedAt - speechStartedAt : null;
-        const silenceWaitMs =
-          silenceStartedAt && speechStartedAt ? stoppedAt - silenceStartedAt : null;
-
+        const bytes = samples.byteLength;
         console.log(
-          `🎙️ Slice size: ${audioBlob.size} bytes | reason=${submitReason}` +
-            (speakMs != null ? ` | since_speech_start=${speakMs}ms` : '') +
-            (silenceWaitMs != null ? ` | since_silence_start=${silenceWaitMs}ms` : '')
+          `🎙️ PCM slice: ${bytes} bytes (${(bytes / (PCM_SAMPLE_RATE * 2)).toFixed(2)}s) | reason=${submitReason}` +
+            (speakMs != null ? ` | since_speech_start=${speakMs}ms` : '')
         );
 
-        if (audioBlob.size > 1500 && ws.current?.readyState === WebSocket.OPEN) {
-          const buffer = await audioBlob.arrayBuffer();
-          const bytes = new Uint8Array(buffer);
-          let binary = '';
-          for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-          const base64 = window.btoa(binary);
-
+        if (bytes > 3200 && ws.current?.readyState === WebSocket.OPEN) {
           ignoreTts.current = false;
           responseActive.current = true;
           setAssistantState('thinking');
           const wsSendAt = Date.now();
+          turnClock.current = {
+            speechAt: speechStartedAt,
+            silenceAt: silenceStartedAt,
+            sendAt: wsSendAt,
+            firstText: false,
+            firstAudio: false,
+            firstPlayback: false,
+          };
+          const speechToSend =
+            speechStartedAt != null ? `${wsSendAt - speechStartedAt}ms` : '?';
+          const silenceToSend =
+            silenceStartedAt != null ? `${wsSendAt - silenceStartedAt}ms` : '?';
           console.log(
-            `📤 Sending audio to WebSocket @ ${new Date(wsSendAt).toISOString()}` +
-              (speechStartedAt != null
-                ? ` | total_from_speech_detect=${wsSendAt - speechStartedAt}ms`
-                : '') +
-              (silenceStartedAt != null
-                ? ` | from_user_stop=${wsSendAt - silenceStartedAt}ms (includes ${SILENCE_MS}ms silence gate)`
-                : '')
+            `📤 Sending PCM to WebSocket @ ${new Date(wsSendAt).toISOString()}` +
+              ` | from_speech=${speechToSend} | from_silence=${silenceToSend}` +
+              ` | pcm=${bytes}B`
           );
           ws.current.send(
             JSON.stringify({
               type: 'audio',
-              data: base64,
+              format: 'pcm_s16le',
+              sample_rate: PCM_SAMPLE_RATE,
+              data: int16ToBase64(samples),
               vad_silence_ms: SILENCE_MS,
               speech_ms: speakMs ?? undefined,
             })
           );
           console.log(
-            `⏱️ [LATENCY] VAD silence gate=${SILENCE_MS}ms | speech≈${speakMs ?? '?'}ms | blob→WS`
+            `⏱️ [LATENCY] VAD silence gate=${SILENCE_MS}ms | speech≈${speakMs ?? '?'}ms | pcm→WS`
           );
         } else {
           console.log('🔇 Slice too small / WS closed — re-arming listen');
@@ -458,18 +631,20 @@ export function useFridayWebSocket() {
         }
       };
 
-      recorder.start(100);
       isMicEnabled.current = true;
       isSpeaking.current = false;
       setAssistantState('listening');
       useFridayStore.setState({ isMicActive: true });
-      console.log('🎧 Listening...');
+      console.log('🎧 Listening (PCM 16kHz)...');
 
       const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
       const startedAt = Date.now();
+      let noiseFloor = 0;
+      let noiseSamples = 0;
+      let peakSpeech = 0;
 
       vadInterval.current = setInterval(() => {
-        if (!mediaRecorder.current || mediaRecorder.current.state !== 'recording') {
+        if (!isCapturing.current) {
           clearVad();
           return;
         }
@@ -477,7 +652,8 @@ export function useFridayWebSocket() {
         // (barge-in monitor handles that path)
         if (isPlaying.current) return;
 
-        if (Date.now() - startedAt > MAX_UTTERANCE_MS && isSpeaking.current) {
+        const utteredFor = speechStartedAt != null ? Date.now() - speechStartedAt : 0;
+        if (isSpeaking.current && utteredFor > MAX_UTTERANCE_MS) {
           submitReason = 'max_utterance';
           console.log(
             `⏱️ Max utterance (${MAX_UTTERANCE_MS}ms) — submitting` +
@@ -486,21 +662,30 @@ export function useFridayWebSocket() {
                 : '')
           );
           clearVad();
-          mediaRecorder.current.stop();
+          submitUtterance();
           return;
         }
 
-        analyserNode.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-        const avg = sum / dataArray.length;
+        const avg = speechBandEnergy(analyserNode, dataArray);
+        const elapsed = Date.now() - startedAt;
+        if (!isSpeaking.current && elapsed < NOISE_CALIBRATE_MS) {
+          noiseSamples += 1;
+          noiseFloor += (avg - noiseFloor) / noiseSamples;
+          return;
+        }
+        if (noiseFloor <= 0) noiseFloor = avg;
 
-        if (avg > SPEECH_THRESHOLD) {
+        const speechCut = Math.max(SPEECH_THRESHOLD, noiseFloor + SPEECH_MARGIN);
+        const silenceCut = noiseFloor + SILENCE_MARGIN;
+
+        if (avg > speechCut) {
+          peakSpeech = Math.max(peakSpeech, avg);
           if (!isSpeaking.current) {
             speechStartedAt = Date.now();
             silenceStartedAt = null;
             console.log(
-              `🗣️ Speech detected @ ${new Date(speechStartedAt).toISOString()} (avg=${avg.toFixed(1)})`
+              `🗣️ Speech detected @ ${new Date(speechStartedAt).toISOString()}` +
+                ` (avg=${avg.toFixed(1)} cut=${speechCut.toFixed(1)} noise=${noiseFloor.toFixed(1)})`
             );
             isSpeaking.current = true;
           }
@@ -515,13 +700,18 @@ export function useFridayWebSocket() {
               silenceStartedAt = null;
             }
           }
-        } else if (isSpeaking.current && !silenceTimer.current) {
+        } else if (
+          isSpeaking.current &&
+          !silenceTimer.current &&
+          (avg < silenceCut || (peakSpeech > 0 && avg < peakSpeech * 0.45))
+        ) {
           silenceStartedAt = Date.now();
           console.log(
             `🔇 User stopped speaking @ ${new Date(silenceStartedAt).toISOString()}` +
               (speechStartedAt != null
                 ? ` | utterance=${silenceStartedAt - speechStartedAt}ms`
                 : '') +
+              ` | avg=${avg.toFixed(1)} silenceCut=${silenceCut.toFixed(1)} peak=${peakSpeech.toFixed(1)}` +
               ` | starting ${SILENCE_MS}ms silence timer…`
           );
           silenceTimer.current = setTimeout(() => {
@@ -533,10 +723,7 @@ export function useFridayWebSocket() {
             );
             silenceTimer.current = null;
             isSpeaking.current = false;
-            clearVad();
-            if (mediaRecorder.current?.state === 'recording') {
-              mediaRecorder.current.stop();
-            }
+            submitUtterance();
           }, SILENCE_MS);
         }
       }, VAD_CONFIG.VAD_POLL_MS);
@@ -560,11 +747,14 @@ export function useFridayWebSocket() {
       isMicEnabled.current = false;
       clearVad();
       clearBargeIn();
-      if (mediaRecorder.current?.state === 'recording') {
-        mediaRecorder.current.stop();
-      } else {
-        stopTracks();
+      isCapturing.current = false;
+      try {
+        pcmProcessor.current?.disconnect();
+      } catch {
+        /* already disconnected */
       }
+      pcmProcessor.current = null;
+      stopTracks();
       useFridayStore.setState({ isMicActive: false });
       setAssistantState('idle');
     } else {

@@ -12,9 +12,13 @@ from app.core.llm import get_llm
 
 from app.agents.coder import CoderAgent
 from app.agents.critic import CriticAgent
-from app.agents.executor import ExecutorAgent
+from app.agents.browser_executor import BrowserExecutorAgent
+from app.agents.desktop_context_executor import DesktopContextExecutorAgent
+from app.agents.desktop_executor import DesktopExecutorAgent
+from app.agents.media_executor import MediaExecutorAgent
 from app.agents.planner import PlannerAgent
 from app.agents.researcher import ResearcherAgent
+from app.agents.system_executor import SystemExecutorAgent
 
 logger = get_logger(__name__)
 
@@ -24,7 +28,9 @@ _EXEC_RE = re.compile(
     r"play|pause|resume|mute|unmute|volume|"
     r"type|write|save|click|focus|"
     r"screenshot|clipboard|terminal|run command|"
-    r"youtube|notepad|chrome|browser|spotify"
+    r"system status|ram|storage|disk|cache|cpu|uptime|battery|clean cache|"
+    r"youtube|notepad|chrome|browser|spotify|camera|webcam|photo|"
+    r"delete|remove"
     r")\b",
     re.I,
 )
@@ -54,6 +60,45 @@ _CODE_RE = re.compile(
     r"\b(code|refactor|debug|function|typescript|python|bug|compile)\b", re.I
 )
 
+_SYSTEM_RE = re.compile(
+    r"\b("
+    r"terminal|run command|shell|volume|system status|ram|storage|disk|cache|cpu|uptime|battery|clean cache|clean tmp"
+    r")\b",
+    re.I,
+)
+_FILE_RE = re.compile(r"\b(delete|remove)\b", re.I)
+_MEDIA_RE = re.compile(
+    r"\b(pause|resume|play|next|previous|mute|unmute)\b.*\b(youtube|video|song|music|track)?\b",
+    re.I,
+)
+_DESKTOP_RE = re.compile(
+    r"\b(write|type|save|screenshot|clipboard|notepad|editor|document|focus|switch|close this|close app|close window|kill process)\b",
+    re.I,
+)
+_APP_LAUNCH_RE = re.compile(
+    r"\b(open|launch)\b.+\b(notepad|terminal|spotify|code|editor|camera|webcam)\b",
+    re.I,
+)
+_CAMERA_RE = re.compile(
+    r"\b("
+    r"open camera|close camera|launch camera|"
+    r"take (a )?photo|click (a )?photo|capture (a )?(photo|picture)|"
+    r"take (a )?picture|click (a )?picture|"
+    r"webcam"
+    r")\b",
+    re.I,
+)
+_DESKTOP_CONTEXT_RE = re.compile(
+    r"\b("
+    r"what app am i in|which app am i in|current window|focused window|focused app|"
+    r"what('?s| is) open|open windows|list windows|what('?s| is) running|running apps|running processes|"
+    r"what.{0,40}(apps?|processes) .{0,20}running|apps? .{0,20}running|"
+    r"is \w[\w-]* running|\w[\w-]* is running|"
+    r"what('?s| is) playing|is .+ open|is .+ running"
+    r")\b",
+    re.I,
+)
+
 
 def _deterministic_route(task: str) -> Optional[str]:
     """Fast path for obvious intents. None → fall back to LLM router."""
@@ -65,24 +110,30 @@ def _deterministic_route(task: str) -> Optional[str]:
         return "planner"
 
     # Desktop / browser *actions* beat pure research
+    if _DESKTOP_CONTEXT_RE.search(t):
+        return "desktop_context_executor"
+    if _CAMERA_RE.search(t):
+        return "desktop_executor"
+    if _FILE_RE.search(t):
+        return "system_executor"
     if _SEARCH_IN_BROWSER_RE.search(t):
-        return "executor"
+        return "browser_executor"
     if re.search(r"\b(write|type)\b.*\b(notepad|editor|document)\b", t, re.I):
-        return "executor"
+        return "desktop_executor"
     if re.search(r"\b(notepad|editor)\b.*\b(write|type)\b", t, re.I):
-        return "executor"
+        return "desktop_executor"
     if re.search(r"\b(save)\b.*\b(it|file|document|notepad)\b", t, re.I):
-        return "executor"
-    if re.search(
-        r"\b(pause|resume|play|next|previous|mute|unmute)\b.*\b(youtube|video|song|music|track)?\b",
-        t,
-        re.I,
-    ):
-        return "executor"
-    if re.search(r"\b(open|launch)\b.+\b(notepad|chrome|terminal|spotify|youtube|code)\b", t, re.I):
-        return "executor"
-    if re.search(r"\b(volume|screenshot|clipboard)\b", t, re.I):
-        return "executor"
+        return "desktop_executor"
+    if _MEDIA_RE.search(t):
+        return "media_executor"
+    if re.search(r"\b(focus|switch to|close|quit|kill process)\b", t, re.I):
+        return "desktop_executor"
+    if re.search(r"\b(open|launch)\b.+\b(chrome|youtube|browser)\b", t, re.I):
+        return "browser_executor"
+    if _APP_LAUNCH_RE.search(t) or _DESKTOP_RE.search(t):
+        return "desktop_executor"
+    if _SYSTEM_RE.search(t):
+        return "system_executor"
 
     # Pure info / news (no chrome/open action)
     if _RESEARCH_RE.search(t) and not _EXEC_RE.search(t):
@@ -99,7 +150,11 @@ def _deterministic_route(task: str) -> Optional[str]:
         t,
         re.I,
     ):
-        return "executor"
+        if re.match(r"^\s*(play|pause|resume|mute|unmute)\b", t, re.I):
+            return "media_executor"
+        if re.match(r"^\s*(type|write|save)\b", t, re.I):
+            return "desktop_executor"
+        return "desktop_executor"
 
     return None
 
@@ -112,7 +167,11 @@ class AgentRouter:
             "planner": PlannerAgent(),
             "researcher": ResearcherAgent(),
             "coder": CoderAgent(),
-            "executor": ExecutorAgent(),
+            "system_executor": SystemExecutorAgent(),
+            "browser_executor": BrowserExecutorAgent(),
+            "media_executor": MediaExecutorAgent(),
+            "desktop_executor": DesktopExecutorAgent(),
+            "desktop_context_executor": DesktopContextExecutorAgent(),
             "critic": CriticAgent(),
         }
 
@@ -121,14 +180,17 @@ class AgentRouter:
             "Pick ONE agent for the user task.\n\n"
             "Rules:\n"
             "- planner: casual chat, greetings, opinions, clarification, 'what did you open?' without a new action.\n"
-            "- executor: desktop/browser ACTIONS — open app/URL, search IN chrome, play/pause media, type/write/save in notepad, volume, screenshot, clipboard, terminal.\n"
-            "  Follow-ups like 'open the same in chrome', 'search that in browser', 'write X in notepad' → executor.\n"
+            "- system_executor: terminal commands, delete/list files in Downloads/Desktop, system status, ram/cpu/disk/cache, volume, maintenance/cleanup.\n"
+            "- browser_executor: open URLs, search in chrome/browser/google, play YouTube, browser follow-ups like 'open the same in chrome'.\n"
+            "- media_executor: pause/play/resume/next/previous/mute/unmute active media.\n"
+            "- desktop_executor: open desktop apps, write/type/save in notepad/editor, clipboard, screenshot/screen analysis, focus windows, close apps/windows, kill a process, open/close camera, take a photo.\n"
+            "- desktop_context_executor: read-only desktop awareness like current window, open windows, running apps, and what's playing.\n"
             "- researcher: factual/news questions answered by web search (NOT opening Chrome).\n"
             "- coder: writing/debugging code.\n"
             "- critic: code review only.\n\n"
             "Recent context (may be empty):\n{context}\n\n"
             "Task: {task}\n\n"
-            "Respond with exactly ONE word: planner|executor|researcher|coder|critic"
+            "Respond with exactly ONE word: planner|system_executor|browser_executor|media_executor|desktop_executor|desktop_context_executor|researcher|coder|critic"
         )
         self.router_chain = prompt | self.llm | StrOutputParser()
 

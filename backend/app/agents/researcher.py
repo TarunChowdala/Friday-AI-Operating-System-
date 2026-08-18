@@ -1,4 +1,5 @@
 from typing import Any, Dict
+import time
 
 from langchain_core.prompts import PromptTemplate
 
@@ -17,9 +18,14 @@ class ResearcherAgent:
 
         self.prompt = PromptTemplate.from_template(
             "You are JARVIS — personal assistant to Tarun Chowdala. Already in the room.\n"
-            "Answer ONLY from the search results. Voice-first: 1–3 short sentences max. No lists, no markdown.\n"
+            "Answer ONLY from the search results. Do not invent facts.\n"
+            "Speak like a human colleague, not a news reader.\n"
+            "DEFAULT: 1–3 short sentences. Then one suggestion or offer more detail "
+            "('Want the full picture?').\n"
+            "FULL DETAIL only if the user asked for details, everything, a full explanation, "
+            "or to go deeper. Then you may use more sentences, still no markdown lists.\n"
             "Address him as Sir sparingly. Never Boss. Never filler like 'I'd be happy to help'.\n"
-            "Do not invent facts. If results are thin, say so briefly.\n\n"
+            "If results are thin, say so briefly.\n\n"
             "Search Results:\n{search_results}\n\n"
             "User: {task}\n"
             "JARVIS:"
@@ -64,11 +70,29 @@ class ResearcherAgent:
         """Search first, then stream the answer — no fake filler before results."""
         logger.info("ResearcherAgent streaming task: %s", task[:80])
         try:
+            search_t0 = time.time()
             results = await self._search(task, context)
+            logger.info(
+                "⏱️ [LATENCY] Researcher search: %.3fs | hits=%d chars",
+                time.time() - search_t0,
+                len(results or ""),
+            )
+            llm_t0 = time.time()
+            first = True
             async for chunk in self.chain.astream(
                 {"task": task, "search_results": results}
             ):
-                yield chunk.content if hasattr(chunk, "content") else str(chunk)
+                piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if first and piece:
+                    first = False
+                    logger.info(
+                        "⏱️ [LATENCY] Researcher first token: %.3fs",
+                        time.time() - llm_t0,
+                    )
+                yield piece
+            logger.info(
+                "⏱️ [LATENCY] Researcher LLM stream: %.3fs", time.time() - llm_t0
+            )
         except Exception as e:
             logger.error("ResearcherAgent stream failed: %s", e)
             yield "I encountered an error while searching, Sir."

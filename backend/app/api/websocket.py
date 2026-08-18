@@ -21,6 +21,10 @@ ws_manager = ConnectionManager()
 voice_manager = VoiceManager()
 agent_router = AgentRouter()
 
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
 # Prefer not to TTS tiny crumbs; flush early on natural breaks.
 _MIN_FLUSH = 12
 _SOFT_FLUSH = 48  # comma/semicolon after this many chars
@@ -87,32 +91,60 @@ async def _speak_and_send(
             time.time() - agent_stream_start,
         )
 
-    await ws_manager.send(client_id, {"type": "ai_text_chunk", "payload": text})
+    logger.info("BOT SPEAK [%d chars]: %s", len(text), text)
+    await ws_manager.send(
+        client_id,
+        {"type": "ai_text_chunk", "payload": text, "t_sent_ms": _now_ms()},
+    )
 
     tts_start = time.time()
     tts_req = TTSRequest(text=text, voice="default")
-    tts_res = await voice_manager.synthesize(tts_req)
-    tts_dt = time.time() - tts_start
-    tts_total[0] += tts_dt
-    logger.info("⏱️ [LATENCY] TTS synth: %.3fs (chars=%d)", tts_dt, len(text))
-
-    if ws_manager.is_interrupted(client_id):
+    pcm_bytes = 0
+    chunk_n = 0
+    try:
+        async for pcm_chunk in voice_manager.synthesize_pcm_stream(tts_req):
+            if ws_manager.is_interrupted(client_id):
+                return False
+            if not pcm_chunk:
+                continue
+            chunk_n += 1
+            pcm_bytes += len(pcm_chunk)
+            if not first_audio_sent[0]:
+                first_audio_sent[0] = True
+                logger.info(
+                    "⏱️ [LATENCY] TTS first PCM: %.3fs (chars=%d chunk=%dB)",
+                    time.time() - tts_start,
+                    len(text),
+                    len(pcm_chunk),
+                )
+                logger.info(
+                    "⚡ [LATENCY] Time-To-First-Audio (TTFA): %.3fs",
+                    time.time() - pipeline_start,
+                )
+            await ws_manager.send(
+                client_id,
+                {
+                    "type": "ai_audio_chunk",
+                    "payload": base64.b64encode(pcm_chunk).decode("utf-8"),
+                    "format": "pcm_s16le",
+                    "sample_rate": 16000,
+                    "t_sent_ms": _now_ms(),
+                    "chars": len(text),
+                },
+            )
+    except Exception as e:
+        logger.error("TTS PCM stream failed: %s", e)
         return False
 
-    if tts_res.audio_data:
-        if not first_audio_sent[0]:
-            first_audio_sent[0] = True
-            logger.info(
-                "⚡ [LATENCY] Time-To-First-Audio (TTFA): %.3fs",
-                time.time() - pipeline_start,
-            )
-        # Late chunks after barge-in are dropped by FE ignoreTts; also skip if interrupted
-        if ws_manager.is_interrupted(client_id):
-            return False
-        ai_audio_b64 = base64.b64encode(tts_res.audio_data).decode("utf-8")
-        await ws_manager.send(
-            client_id, {"type": "ai_audio_chunk", "payload": ai_audio_b64}
-        )
+    tts_total[0] += time.time() - tts_start
+    logger.info(
+        "⏱️ [LATENCY] TTS stream done: %.3fs (chars=%d pcm=%dB chunks=%d) text=%s",
+        time.time() - tts_start,
+        len(text),
+        pcm_bytes,
+        chunk_n,
+        text[:80],
+    )
     return True
 
 
@@ -134,7 +166,12 @@ async def _handle_turn(
         if speech_ms is not None:
             logger.info("⏱️ [LATENCY] User speech duration: %.0fms", speech_ms)
 
+        logger.info("USER: %s", user_text)
+        redis_start = time.time()
         live = await session_manager.append_message(client_id, "user", user_text)
+        logger.info(
+            "⏱️ [LATENCY] Redis append_user: %.3fs", time.time() - redis_start
+        )
         session_id = live["session_id"]
         logger.info("Redis session=%s msgs=%d", session_id, len(live["messages"]))
 
@@ -204,6 +241,11 @@ async def _handle_turn(
         if interrupted or ws_manager.is_interrupted(client_id):
             logger.info("Turn interrupted mid-stream for %s", client_id)
             if full_ai_text.strip():
+                logger.info(
+                    "BOT RESPONSE [interrupted, %d chars]: %s",
+                    len(full_ai_text.strip()),
+                    full_ai_text.strip().replace("\n", " "),
+                )
                 await session_manager.append_message(
                     client_id, "assistant", full_ai_text.strip() + " [interrupted]"
                 )
@@ -231,21 +273,33 @@ async def _handle_turn(
             return
 
         agent_total_time = time.time() - agent_stream_start
+        save_start = time.time()
         await session_manager.append_message(client_id, "assistant", full_ai_text)
+        logger.info(
+            "⏱️ [LATENCY] Redis append_bot: %.3fs", time.time() - save_start
+        )
         await ws_manager.send(
-            client_id, {"type": "ai_text_complete", "payload": full_ai_text}
+            client_id,
+            {
+                "type": "ai_text_complete",
+                "payload": full_ai_text,
+                "t_sent_ms": _now_ms(),
+            },
         )
 
         total_pipeline_time = time.time() - pipeline_start
+        reply = (full_ai_text or "").replace("\n", " ").strip()
+        logger.info("BOT RESPONSE [%d chars]: %s", len(reply), reply)
         logger.info(
             "📊 [LATENCY SUMMARY] Total: %.3fs | STT: %.3fs | Router: %.3fs | "
-            "Agent Stream: %.3fs | TTS Total: %.3fs | TTFA_hit: %s",
+            "Agent Stream: %.3fs | TTS Total: %.3fs | TTFA_hit: %s | agent=%s",
             total_pipeline_time,
             stt_time,
             router_time,
             agent_total_time,
             tts_total[0],
             first_audio_sent[0],
+            target_agent,
         )
     except asyncio.CancelledError:
         logger.info("Turn task cancelled for %s", client_id)
@@ -295,13 +349,35 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 await asyncio.sleep(0)
 
                 audio_bytes = base64.b64decode(audio_b64)
+                audio_format = (data.get("format") or "webm").lower()
+                sample_rate = int(data.get("sample_rate") or 16000)
+                logger.info(
+                    "⏱️ [LATENCY] Audio recv: raw=%dB b64=%dB format=%s rate=%s",
+                    len(audio_bytes),
+                    len(audio_b64),
+                    audio_format,
+                    sample_rate,
+                )
                 stt_start = time.time()
-                transcription = await voice_manager.transcribe(audio_bytes)
+                transcription = await voice_manager.transcribe(
+                    audio_bytes,
+                    filename="audio.pcm" if "pcm" in audio_format else "audio.webm",
+                    audio_format=audio_format,
+                )
                 stt_time = time.time() - stt_start
                 user_text = transcription.text.strip()
-                logger.info("⏱️ [LATENCY] STT (Whisper): %.3fs", stt_time)
+                logger.info(
+                    "⏱️ [LATENCY] STT (Whisper): %.3fs | heard: %s",
+                    stt_time,
+                    user_text,
+                )
                 await ws_manager.send(
-                    client_id, {"type": "transcription", "payload": user_text}
+                    client_id,
+                    {
+                        "type": "transcription",
+                        "payload": user_text,
+                        "t_sent_ms": _now_ms(),
+                    },
                 )
 
             elif msg_type == "text":
@@ -315,6 +391,18 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 
             if not user_text:
                 continue
+
+            # Check if this is a permission code response
+            from app.core.permissions import verify_permission, has_pending
+            if has_pending(client_id):
+                perm_result = verify_permission(client_id, user_text)
+                if perm_result is True:
+                    await ws_manager.send(client_id, {"type": "permission_granted", "message": "Confirmed. Executing."})
+                    continue
+                elif perm_result is False:
+                    await ws_manager.send(client_id, {"type": "permission_denied", "message": "Cancelled."})
+                    continue
+                # perm_result is None → not a permission response, proceed normally
 
             ws_manager.clear_interrupt(client_id)
             task = asyncio.create_task(

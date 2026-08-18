@@ -1,7 +1,12 @@
-"""ElevenLabs Text-to-Speech service integration."""
+"""ElevenLabs TTS → canonical 16 kHz PCM chunks (HTTP stream, same interface as Edge)."""
+from __future__ import annotations
+
 import time
+from typing import AsyncIterator
+
 import httpx
 
+from app.core.audio_pcm import PCM_CHUNK_BYTES, mp3_to_pcm16, pcm_ms, yield_pcm_chunks
 from app.core.config import get_settings
 from app.core.logger import get_logger
 from app.models.voice import TTSRequest, TTSResponse
@@ -29,20 +34,7 @@ class ElevenLabsTTSService:
                 "Calls to ElevenLabs TTS will fail unless key is configured."
             )
 
-    async def synthesize(self, request: TTSRequest) -> TTSResponse:
-        """Asynchronously synthesizes text into audio bytes using ElevenLabs API.
-
-        LIMITATION: ElevenLabs non-streaming HTTP endpoint — full MP3 body is
-        buffered before return. Cancellation mid-request is not supported; barge-in
-        drops late chunks on the frontend via ignoreTts.
-        """
-        if not self.api_key:
-            logger.error("ElevenLabs TTS requested but ELEVENLABS_API_KEY is not configured.")
-            return TTSResponse(audio_data=None, format="mp3", duration_ms=0)
-
-        logger.debug("Synthesizing speech via ElevenLabs: %s...", request.text[:40])
-        start_time = time.time()
-
+    def _voice_id(self, request: TTSRequest) -> str:
         voice_id = self.default_voice_id
         if (
             request.voice
@@ -50,14 +42,10 @@ class ElevenLabsTTSService:
             and not request.voice.startswith("en-")
         ):
             voice_id = request.voice
+        return voice_id
 
-        url = f"{self.base_url}/text-to-speech/{voice_id}"
-        headers = {
-            "xi-api-key": self.api_key,
-            "Content-Type": "application/json",
-            "Accept": "audio/mpeg",
-        }
-        payload = {
+    def _payload(self, request: TTSRequest) -> dict:
+        return {
             "text": request.text,
             "model_id": self.model_id,
             "voice_settings": {
@@ -66,28 +54,91 @@ class ElevenLabsTTSService:
             },
         }
 
+    async def synthesize_pcm_stream(self, request: TTSRequest) -> AsyncIterator[bytes]:
+        """Prefer PCM HTTP stream; fall back to MP3 → PCM so the wire format stays PCM."""
+        if not self.api_key:
+            logger.error("ElevenLabs TTS requested but ELEVENLABS_API_KEY is not configured.")
+            return
+
+        logger.debug("ElevenLabs PCM stream: %s...", request.text[:40])
+        start = time.time()
+        voice_id = self._voice_id(request)
+        url = f"{self.base_url}/text-to-speech/{voice_id}/stream"
+        headers = {
+            "xi-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/octet-stream",
+        }
+        params = {"output_format": "pcm_16000"}
+        got_any = False
+
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                if response.status_code != 200:
-                    logger.error(
-                        "ElevenLabs API Error HTTP %d: %s | URL: %s | Payload: %s",
-                        response.status_code,
-                        response.text,
-                        url,
-                        payload,
-                    )
-                response.raise_for_status()
-                audio_bytes = response.content
-
-            duration_ms = int((time.time() - start_time) * 1000)
-            logger.info("ElevenLabs TTS generated audio in %dms", duration_ms)
-
-            return TTSResponse(
-                audio_data=audio_bytes,
-                format="mp3",
-                duration_ms=duration_ms,
-            )
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                async with client.stream(
+                    "POST", url, json=self._payload(request), headers=headers, params=params
+                ) as response:
+                    if response.status_code != 200:
+                        body = (await response.aread())[:500]
+                        logger.warning(
+                            "ElevenLabs PCM stream HTTP %d: %s — falling back to MP3",
+                            response.status_code,
+                            body,
+                        )
+                    else:
+                        buffer = b""
+                        async for piece in response.aiter_bytes():
+                            if not piece:
+                                continue
+                            buffer += piece
+                            while len(buffer) >= PCM_CHUNK_BYTES:
+                                got_any = True
+                                yield buffer[:PCM_CHUNK_BYTES]
+                                buffer = buffer[PCM_CHUNK_BYTES:]
+                        if buffer:
+                            got_any = True
+                            yield buffer
+                        logger.info(
+                            "ElevenLabs PCM stream in %dms",
+                            int((time.time() - start) * 1000),
+                        )
+                        return
         except Exception as e:
-            logger.error("ElevenLabs TTS synthesis failed: %s", e)
-            return TTSResponse(audio_data=None, format="mp3", duration_ms=0)
+            logger.warning("ElevenLabs PCM stream failed (%s) — MP3 fallback", e)
+
+        # Same character quota, just not streamed: MP3 then ffmpeg → PCM chunks.
+        try:
+            pcm = await self._mp3_then_pcm(request)
+        except Exception as e:
+            logger.error("ElevenLabs TTS failed: %s", e)
+            return
+        if not got_any:
+            logger.info(
+                "ElevenLabs MP3→PCM in %dms (%dB)",
+                int((time.time() - start) * 1000),
+                len(pcm),
+            )
+        async for chunk in yield_pcm_chunks(pcm):
+            yield chunk
+
+    async def _mp3_then_pcm(self, request: TTSRequest) -> bytes:
+        url = f"{self.base_url}/text-to-speech/{self._voice_id(request)}"
+        headers = {
+            "xi-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, json=self._payload(request), headers=headers)
+            response.raise_for_status()
+            return await mp3_to_pcm16(response.content)
+
+    async def synthesize(self, request: TTSRequest) -> TTSResponse:
+        buf = bytearray()
+        async for chunk in self.synthesize_pcm_stream(request):
+            buf.extend(chunk)
+        pcm = bytes(buf)
+        return TTSResponse(
+            audio_data=pcm or None,
+            format="pcm_s16le",
+            duration_ms=pcm_ms(len(pcm)),
+        )

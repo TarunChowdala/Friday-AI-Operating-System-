@@ -62,6 +62,13 @@ class SessionManager:
             "pending_confirmation": None,
             "current_project": None,
             "browser_state": {},
+            "desktop_state": {
+                "active_window": None,
+                "windows": [],
+                "running_apps": [],
+                "media": {},
+                "captured_at": None,
+            },
             "open_apps": [],
             "focused_target": None,
             "terminal_cwd": None,
@@ -195,6 +202,17 @@ class SessionManager:
         await self._save(data)
         return data
 
+    async def set_desktop_state(
+        self, client_id: str, desktop_state: dict[str, Any]
+    ) -> dict[str, Any]:
+        data = await self.get_or_create(client_id)
+        current = dict(data.get("desktop_state") or {})
+        current.update(desktop_state or {})
+        current["captured_at"] = _utcnow()
+        data["desktop_state"] = current
+        await self._save(data)
+        return data
+
     async def add_tool_result(
         self, client_id: str, tool_name: str, result: Any, *, status: str = "success"
     ) -> dict[str, Any]:
@@ -275,6 +293,7 @@ class SessionManager:
         focused = data.get("focused_target") or {}
         apps = data.get("open_apps") or []
         browser = data.get("browser_state") or {}
+        desktop = data.get("desktop_state") or {}
         tools = data.get("tool_results") or []
         lines = ["WORKSPACE STATE (what JARVIS already opened this session):"]
         if focused:
@@ -298,6 +317,18 @@ class SessionManager:
         if yt:
             lines.append(
                 f"- YOUTUBE: query={yt.get('query') or '-'} url={yt.get('url') or '-'}"
+            )
+        active = desktop.get("active_window") or {}
+        if active.get("title"):
+            lines.append(
+                f"- LIVE DESKTOP FOCUS: title={active.get('title')} "
+                f"app={active.get('app') or '-'} pid={active.get('pid') or '-'}"
+            )
+        media = desktop.get("media") or {}
+        if media.get("status"):
+            lines.append(
+                f"- LIVE MEDIA: status={media.get('status')} "
+                f"title={media.get('title') or '-'} player={media.get('player') or '-'}"
             )
         if tools:
             lines.append("- RECENT TOOL RESULTS (newest last):")

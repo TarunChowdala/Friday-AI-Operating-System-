@@ -12,10 +12,13 @@ logger = get_logger(__name__)
 
 
 class ConnectionManager:
+    _instance: "ConnectionManager | None" = None
+
     def __init__(self) -> None:
         self.active: Dict[str, WebSocket] = {}
         self._interrupt: Dict[str, asyncio.Event] = {}
         self._turn_tasks: Dict[str, asyncio.Task] = {}
+        ConnectionManager._instance = self
 
     async def connect(self, client_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
