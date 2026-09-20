@@ -48,10 +48,16 @@ class PlannerAgent:
         try:
             async for chunk in self.llm.astream(messages):
                 piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if isinstance(piece, list):
+                    piece = "".join(
+                        p if isinstance(p, str) else p.get("text", "") 
+                        for p in piece if isinstance(p, (str, dict))
+                    )
                 if first and piece:
                     first = False
                     logger.info("⏱️ [LATENCY] Planner first token: %.3fs", time.time() - t0)
-                yield piece
+                if piece:
+                    yield piece
             logger.info("⏱️ [LATENCY] Planner stream total: %.3fs", time.time() - t0)
         except Exception as e:
             logger.error("PlannerAgent stream failed: %s", e)

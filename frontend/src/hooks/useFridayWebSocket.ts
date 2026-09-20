@@ -1,32 +1,18 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useFridayStore } from '../store/useFridayStore';
+import { MicVAD } from "@ricky0123/vad-web";
 
 /** Tunable VAD / endpointing (energy VAD — not Silero). */
 export const VAD_CONFIG = {
   /** Fallback if noise floor isn't ready yet. Speech-band energy, not all FFT bins. */
-  SPEECH_THRESHOLD: 28,
+  SPEECH_THRESHOLD: 45,
   SILENCE_MS: 650,
   MAX_UTTERANCE_MS: 12000,
   VAD_POLL_MS: 50,
   NOISE_CALIBRATE_MS: 400,
-  SPEECH_MARGIN: 16,
+  SPEECH_MARGIN: 25,
   SILENCE_MARGIN: 7,
 } as const;
-
-function speechBandEnergy(analyserNode: AnalyserNode, dataArray: Uint8Array): number {
-  analyserNode.getByteFrequencyData(dataArray);
-  const sampleRate = analyserNode.context.sampleRate || 48000;
-  const binHz = sampleRate / analyserNode.fftSize;
-  const lo = Math.max(1, Math.floor(300 / binHz));
-  const hi = Math.min(dataArray.length - 1, Math.ceil(3400 / binHz));
-  let sum = 0;
-  let n = 0;
-  for (let i = lo; i <= hi; i++) {
-    sum += dataArray[i];
-    n++;
-  }
-  return n ? sum / n : 0;
-}
 
 export const PCM_SAMPLE_RATE = 16000;
 
@@ -35,29 +21,6 @@ function floatToPcm16(input: Float32Array): Int16Array {
   for (let i = 0; i < input.length; i++) {
     const s = Math.max(-1, Math.min(1, input[i]));
     out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out;
-}
-
-function downsample(input: Float32Array, inRate: number, outRate: number): Float32Array {
-  if (inRate === outRate) return input;
-  const ratio = inRate / outRate;
-  const outLen = Math.max(1, Math.floor(input.length / ratio));
-  const out = new Float32Array(outLen);
-  for (let i = 0; i < outLen; i++) {
-    out[i] = input[Math.min(input.length - 1, Math.floor(i * ratio))];
-  }
-  return out;
-}
-
-function concatInt16(chunks: Int16Array[]): Int16Array {
-  let n = 0;
-  for (const c of chunks) n += c.length;
-  const out = new Int16Array(n);
-  let o = 0;
-  for (const c of chunks) {
-    out.set(c, o);
-    o += c.length;
   }
   return out;
 }
@@ -110,15 +73,11 @@ export function useFridayWebSocket() {
   /** True from user submit until ai_text_complete / interrupt — blocks premature mic re-arm between TTS chunks */
   const responseActive = useRef(false);
 
-  const pcmChunks = useRef<Int16Array[]>([]);
-  const pcmProcessor = useRef<ScriptProcessorNode | null>(null);
   const isCapturing = useRef(false);
   const isMicEnabled = useRef(false);
   const mediaStream = useRef<MediaStream | null>(null);
+  const myvad = useRef<any>(null);
 
-  const analyser = useRef<AnalyserNode | null>(null);
-  const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const vadInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const bargeInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const bargeGraceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const speakingStartedAt = useRef(0);
@@ -150,13 +109,8 @@ export function useFridayWebSocket() {
   };
 
   const clearVad = () => {
-    if (vadInterval.current) {
-      clearInterval(vadInterval.current);
-      vadInterval.current = null;
-    }
-    if (silenceTimer.current) {
-      clearTimeout(silenceTimer.current);
-      silenceTimer.current = null;
+    if (myvad.current) {
+      myvad.current.pause();
     }
   };
 
@@ -274,8 +228,8 @@ export function useFridayWebSocket() {
     if (!isMicEnabled.current) return;
 
     const BARGE_GRACE_MS = 700; // ignore her own voice echo at start of TTS
-    const BARGE_THRESHOLD = 30;
-    const REQUIRED_HITS = 30; // ~1.5s sustained user speech before stop (50ms ticks)
+    const BARGE_THRESHOLD = 45;
+    const REQUIRED_HITS = 8; // ~400ms sustained user speech before stop (50ms ticks)
 
     bargeGraceTimer.current = setTimeout(async () => {
       bargeGraceTimer.current = null;
@@ -493,13 +447,10 @@ export function useFridayWebSocket() {
   const startListening = useCallback(async () => {
     try {
       if (isCapturing.current) return;
-      // Between TTS chunks only — never block an explicit mic-on (responseActive cleared in toggleMic)
       if (responseActive.current && !isPlaying.current && audioQueue.current.length === 0) {
-        // Stale flag after TTS: clear and continue
         responseActive.current = false;
       }
 
-      // If FRIDAY is talking, cut her off first
       if (isPlaying.current || audioQueue.current.length > 0) {
         sendInterrupt();
       }
@@ -515,218 +466,64 @@ export function useFridayWebSocket() {
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       mediaStream.current = stream;
 
-      const sourceNode = audioContext.current.createMediaStreamSource(stream);
-      const analyserNode = audioContext.current.createAnalyser();
-      analyserNode.fftSize = 512;
-      analyserNode.smoothingTimeConstant = 0.5;
-      sourceNode.connect(analyserNode);
-      analyser.current = analyserNode;
-
-      pcmChunks.current = [];
-      const proc = audioContext.current.createScriptProcessor(4096, 1, 1);
-      const mute = audioContext.current.createGain();
-      mute.gain.value = 0;
-      sourceNode.connect(proc);
-      proc.connect(mute);
-      mute.connect(audioContext.current.destination);
-      pcmProcessor.current = proc;
       isCapturing.current = true;
-      proc.onaudioprocess = (ev) => {
-        if (!isCapturing.current) return;
-        const input = ev.inputBuffer.getChannelData(0);
-        const inRate = audioContext.current?.sampleRate || 48000;
-        const ds = downsample(input, inRate, PCM_SAMPLE_RATE);
-        pcmChunks.current.push(new Int16Array(floatToPcm16(ds)));
-      };
-
-      const SPEECH_THRESHOLD = VAD_CONFIG.SPEECH_THRESHOLD;
-      const SILENCE_MS = VAD_CONFIG.SILENCE_MS;
-      const MAX_UTTERANCE_MS = VAD_CONFIG.MAX_UTTERANCE_MS;
-      const NOISE_CALIBRATE_MS = VAD_CONFIG.NOISE_CALIBRATE_MS;
-      const SPEECH_MARGIN = VAD_CONFIG.SPEECH_MARGIN;
-      const SILENCE_MARGIN = VAD_CONFIG.SILENCE_MARGIN;
-
-      let speechStartedAt: number | null = null;
-      let silenceStartedAt: number | null = null;
-      let submitReason: 'silence' | 'max_utterance' | 'unknown' = 'unknown';
-      let submitted = false;
-
-      const stopCapture = () => {
-        isCapturing.current = false;
-        try {
-          pcmProcessor.current?.disconnect();
-        } catch {
-          /* already disconnected */
-        }
-        pcmProcessor.current = null;
-        stopTracks();
-      };
-
-      const submitUtterance = () => {
-        if (submitted) return;
-        submitted = true;
-        clearVad();
-        const stoppedAt = Date.now();
-        const samples = concatInt16(pcmChunks.current);
-        pcmChunks.current = [];
-        stopCapture();
-
-        if (!isMicEnabled.current) return;
-
-        const speakMs = speechStartedAt ? stoppedAt - speechStartedAt : null;
-        const bytes = samples.byteLength;
-        console.log(
-          `🎙️ PCM slice: ${bytes} bytes (${(bytes / (PCM_SAMPLE_RATE * 2)).toFixed(2)}s) | reason=${submitReason}` +
-            (speakMs != null ? ` | since_speech_start=${speakMs}ms` : '')
-        );
-
-        if (bytes > 3200 && ws.current?.readyState === WebSocket.OPEN) {
-          ignoreTts.current = false;
-          responseActive.current = true;
-          setAssistantState('thinking');
-          const wsSendAt = Date.now();
-          turnClock.current = {
-            speechAt: speechStartedAt,
-            silenceAt: silenceStartedAt,
-            sendAt: wsSendAt,
-            firstText: false,
-            firstAudio: false,
-            firstPlayback: false,
-          };
-          const speechToSend =
-            speechStartedAt != null ? `${wsSendAt - speechStartedAt}ms` : '?';
-          const silenceToSend =
-            silenceStartedAt != null ? `${wsSendAt - silenceStartedAt}ms` : '?';
-          console.log(
-            `📤 Sending PCM to WebSocket @ ${new Date(wsSendAt).toISOString()}` +
-              ` | from_speech=${speechToSend} | from_silence=${silenceToSend}` +
-              ` | pcm=${bytes}B`
-          );
-          ws.current.send(
-            JSON.stringify({
-              type: 'audio',
-              format: 'pcm_s16le',
-              sample_rate: PCM_SAMPLE_RATE,
-              data: int16ToBase64(samples),
-              vad_silence_ms: SILENCE_MS,
-              speech_ms: speakMs ?? undefined,
-            })
-          );
-          console.log(
-            `⏱️ [LATENCY] VAD silence gate=${SILENCE_MS}ms | speech≈${speakMs ?? '?'}ms | pcm→WS`
-          );
-        } else {
-          console.log('🔇 Slice too small / WS closed — re-arming listen');
-          if (isMicEnabled.current && !isPlaying.current && !responseActive.current) {
-            startListeningRef.current();
-          }
-        }
-      };
-
       isMicEnabled.current = true;
       isSpeaking.current = false;
       setAssistantState('listening');
       useFridayStore.setState({ isMicActive: true });
-      console.log('🎧 Listening (PCM 16kHz)...');
+      console.log('🎧 Listening (Silero AI VAD)...');
 
-      const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
-      const startedAt = Date.now();
-      let noiseFloor = 0;
-      let noiseSamples = 0;
-      let peakSpeech = 0;
+      myvad.current = await MicVAD.new({
+        getStream: async () => stream,
+        positiveSpeechThreshold: 0.5,
+        redemptionMs: 650,
+        baseAssetPath: "/",
+        onnxWASMBasePath: "/",
+        model: "legacy",
+        onSpeechStart: () => {
+          console.log("🗣️ Speech started (Silero)");
+          isSpeaking.current = true;
+        },
+        onSpeechEnd: (audio) => {
+          console.log("🔇 Speech ended (Silero). Processing chunk...");
+          isSpeaking.current = false;
+          
+          const pcm16 = floatToPcm16(audio);
+          const bytes = pcm16.byteLength;
+          console.log(`🎙️ PCM slice: ${bytes} bytes`);
 
-      vadInterval.current = setInterval(() => {
-        if (!isCapturing.current) {
-          clearVad();
-          return;
-        }
-        // Don't listen for end-of-utterance while we're still playing old TTS
-        // (barge-in monitor handles that path)
-        if (isPlaying.current) return;
-
-        const utteredFor = speechStartedAt != null ? Date.now() - speechStartedAt : 0;
-        if (isSpeaking.current && utteredFor > MAX_UTTERANCE_MS) {
-          submitReason = 'max_utterance';
-          console.log(
-            `⏱️ Max utterance (${MAX_UTTERANCE_MS}ms) — submitting` +
-              (speechStartedAt != null
-                ? ` | spoke_for=${Date.now() - speechStartedAt}ms`
-                : '')
-          );
-          clearVad();
-          submitUtterance();
-          return;
-        }
-
-        const avg = speechBandEnergy(analyserNode, dataArray);
-        const elapsed = Date.now() - startedAt;
-        if (!isSpeaking.current && elapsed < NOISE_CALIBRATE_MS) {
-          noiseSamples += 1;
-          noiseFloor += (avg - noiseFloor) / noiseSamples;
-          return;
-        }
-        if (noiseFloor <= 0) noiseFloor = avg;
-
-        const speechCut = Math.max(SPEECH_THRESHOLD, noiseFloor + SPEECH_MARGIN);
-        const silenceCut = noiseFloor + SILENCE_MARGIN;
-
-        if (avg > speechCut) {
-          peakSpeech = Math.max(peakSpeech, avg);
-          if (!isSpeaking.current) {
-            speechStartedAt = Date.now();
-            silenceStartedAt = null;
-            console.log(
-              `🗣️ Speech detected @ ${new Date(speechStartedAt).toISOString()}` +
-                ` (avg=${avg.toFixed(1)} cut=${speechCut.toFixed(1)} noise=${noiseFloor.toFixed(1)})`
+          if (bytes > 3200 && ws.current?.readyState === WebSocket.OPEN) {
+            ignoreTts.current = false;
+            responseActive.current = true;
+            setAssistantState('thinking');
+            
+            ws.current.send(
+              JSON.stringify({
+                type: 'audio',
+                format: 'pcm_s16le',
+                sample_rate: 16000,
+                data: int16ToBase64(pcm16),
+                vad_silence_ms: 650,
+              })
             );
-            isSpeaking.current = true;
-          }
-          // User started talking again before silence timer fired
-          if (silenceTimer.current) {
-            clearTimeout(silenceTimer.current);
-            silenceTimer.current = null;
-            if (silenceStartedAt != null) {
-              console.log(
-                `🗣️ Speech resumed — cancelled silence timer after ${Date.now() - silenceStartedAt}ms`
-              );
-              silenceStartedAt = null;
+          } else {
+            console.log('🔇 Slice too small / WS closed — re-arming listen');
+            if (isMicEnabled.current && !isPlaying.current && !responseActive.current) {
+              startListeningRef.current();
             }
           }
-        } else if (
-          isSpeaking.current &&
-          !silenceTimer.current &&
-          (avg < silenceCut || (peakSpeech > 0 && avg < peakSpeech * 0.45))
-        ) {
-          silenceStartedAt = Date.now();
-          console.log(
-            `🔇 User stopped speaking @ ${new Date(silenceStartedAt).toISOString()}` +
-              (speechStartedAt != null
-                ? ` | utterance=${silenceStartedAt - speechStartedAt}ms`
-                : '') +
-              ` | avg=${avg.toFixed(1)} silenceCut=${silenceCut.toFixed(1)} peak=${peakSpeech.toFixed(1)}` +
-              ` | starting ${SILENCE_MS}ms silence timer…`
-          );
-          silenceTimer.current = setTimeout(() => {
-            const firedAt = Date.now();
-            submitReason = 'silence';
-            console.log(
-              `✅ Silence timer fired @ ${new Date(firedAt).toISOString()}` +
-                ` | waited=${firedAt - (silenceStartedAt ?? firedAt)}ms → stop recorder → WS next`
-            );
-            silenceTimer.current = null;
-            isSpeaking.current = false;
-            submitUtterance();
-          }, SILENCE_MS);
+        },
+        onVADMisfire: () => {
+          console.log("❌ VAD misfire (ignored noise)");
+          isSpeaking.current = false;
         }
-      }, VAD_CONFIG.VAD_POLL_MS);
+      });
+      myvad.current.start();
+
     } catch (err) {
       console.error('Mic access error:', err);
       isMicEnabled.current = false;
@@ -748,18 +545,11 @@ export function useFridayWebSocket() {
       clearVad();
       clearBargeIn();
       isCapturing.current = false;
-      try {
-        pcmProcessor.current?.disconnect();
-      } catch {
-        /* already disconnected */
-      }
-      pcmProcessor.current = null;
       stopTracks();
       useFridayStore.setState({ isMicActive: false });
       setAssistantState('idle');
     } else {
       console.log('🎤 Mic ON');
-      // Explicit user mic-on must not be blocked by sticky responseActive from prior TTS
       responseActive.current = false;
       ignoreTts.current = false;
       isMicEnabled.current = true;

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-2.0-flash"
     OPENAI_API_KEY: str | None = None
+    SERPER_API_KEY: str | None = None
 
     EMBEDDING_MODEL: str = "nomic-embed-text"
 

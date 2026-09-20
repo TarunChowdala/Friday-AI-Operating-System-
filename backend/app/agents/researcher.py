@@ -67,8 +67,23 @@ class ResearcherAgent:
         return results
 
     async def stream(self, task: str, context: Dict[str, Any] | None = None):
-        """Search first, then stream the answer — no fake filler before results."""
+        import random
         logger.info("ResearcherAgent streaming task: %s", task[:80])
+        
+        # Yield immediate filler audio to mask latency
+        fillers = [
+            "Let me look into that, Sir. ",
+            "Searching for that right now. ",
+            "Just a moment, let me check the web. ",
+            "Working on it, Sir. ",
+            "Let me pull that up. ",
+            "I'll find out for you, Sir. ",
+            "One moment, running a search. ",
+            "Scanning the web for that information. ",
+            "Let's see what I can find. "
+        ]
+        yield random.choice(fillers)
+        
         try:
             search_t0 = time.time()
             results = await self._search(task, context)
@@ -83,13 +98,19 @@ class ResearcherAgent:
                 {"task": task, "search_results": results}
             ):
                 piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if isinstance(piece, list):
+                    piece = "".join(
+                        p if isinstance(p, str) else p.get("text", "") 
+                        for p in piece if isinstance(p, (str, dict))
+                    )
                 if first and piece:
                     first = False
                     logger.info(
                         "⏱️ [LATENCY] Researcher first token: %.3fs",
                         time.time() - llm_t0,
                     )
-                yield piece
+                if piece:
+                    yield piece
             logger.info(
                 "⏱️ [LATENCY] Researcher LLM stream: %.3fs", time.time() - llm_t0
             )
