@@ -1,20 +1,36 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useFridayStore } from '../store/useFridayStore';
 import { MicVAD } from "@ricky0123/vad-web";
-
-/** Tunable VAD / endpointing (energy VAD — not Silero). */
-export const VAD_CONFIG = {
-  /** Fallback if noise floor isn't ready yet. Speech-band energy, not all FFT bins. */
-  SPEECH_THRESHOLD: 45,
-  SILENCE_MS: 650,
-  MAX_UTTERANCE_MS: 12000,
-  VAD_POLL_MS: 50,
-  NOISE_CALIBRATE_MS: 400,
-  SPEECH_MARGIN: 25,
-  SILENCE_MARGIN: 7,
-} as const;
+import { VoiceTurnController } from './voiceTurnController';
 
 export const PCM_SAMPLE_RATE = 16000;
+
+type VadProbabilityWindow = {
+  startedAt: number;
+  frames: number;
+  probabilitySum: number;
+  probabilityPeak: number;
+  aboveThreshold: number;
+  rmsSum: number;
+};
+
+function newVadProbabilityWindow(): VadProbabilityWindow {
+  return { startedAt: Date.now(), frames: 0, probabilitySum: 0, probabilityPeak: 0, aboveThreshold: 0, rmsSum: 0 };
+}
+
+function audioSignalStats(samples: Float32Array) {
+  let sumSquares = 0;
+  let peak = 0;
+  let clippedSamples = 0;
+  for (const sample of samples) {
+    const magnitude = Math.abs(sample);
+    sumSquares += sample * sample;
+    peak = Math.max(peak, magnitude);
+    if (magnitude >= 0.999) clippedSamples++;
+  }
+  const rms = samples.length ? Math.sqrt(sumSquares / samples.length) : 0;
+  return { rms: Number(rms.toFixed(4)), peak: Number(peak.toFixed(4)), clippedSamples };
+}
 
 function floatToPcm16(input: Float32Array): Int16Array {
   const out = new Int16Array(input.length);
@@ -75,15 +91,13 @@ export function useFridayWebSocket() {
 
   const isCapturing = useRef(false);
   const isMicEnabled = useRef(false);
+  const micGeneration = useRef(0);
   const mediaStream = useRef<MediaStream | null>(null);
   const myvad = useRef<any>(null);
 
-  const bargeInterval = useRef<ReturnType<typeof setInterval> | null>(null);
-  const bargeGraceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const speakingStartedAt = useRef(0);
-  const isSpeaking = useRef(false);
   const startListeningRef = useRef<() => Promise<void>>(async () => {});
-  const interruptRef = useRef<() => void>(() => {});
+  const voiceTurn = useRef<VoiceTurnController | null>(null);
+  const vadProbabilityWindow = useRef(newVadProbabilityWindow());
   const turnClock = useRef<{
     speechAt: number | null;
     silenceAt: number | null;
@@ -108,28 +122,6 @@ export function useFridayWebSocket() {
     console.log(`⏱️ [FE LATENCY] ${label} | ${fromSend}${net}`);
   };
 
-  const clearVad = () => {
-    if (myvad.current) {
-      myvad.current.pause();
-    }
-  };
-
-  const clearBargeIn = () => {
-    if (bargeInterval.current) {
-      clearInterval(bargeInterval.current);
-      bargeInterval.current = null;
-    }
-    if (bargeGraceTimer.current) {
-      clearTimeout(bargeGraceTimer.current);
-      bargeGraceTimer.current = null;
-    }
-  };
-
-  const stopTracks = () => {
-    mediaStream.current?.getTracks().forEach((t) => t.stop());
-    mediaStream.current = null;
-  };
-
   const stopPlayback = useCallback(() => {
     try {
       currentSource.current?.stop();
@@ -139,9 +131,18 @@ export function useFridayWebSocket() {
     currentSource.current = null;
     audioQueue.current = [];
     isPlaying.current = false;
+    voiceTurn.current?.setAssistantActive(false);
   }, []);
 
-  const sendInterrupt = useCallback(() => {
+  const sendInterrupt = useCallback((source: string = 'unspecified') => {
+    console.info('[VOICE INTERRUPT] requested', {
+      source,
+      at: new Date().toISOString(),
+      isPlaying: isPlaying.current,
+      queuedAudioChunks: audioQueue.current.length,
+      responseActive: responseActive.current,
+      micEnabled: isMicEnabled.current,
+    });
     ignoreTts.current = true;
     responseActive.current = false;
     stopPlayback();
@@ -152,7 +153,41 @@ export function useFridayWebSocket() {
     setAssistantState(isMicEnabled.current ? 'listening' : 'idle');
   }, [setAssistantState, stopPlayback]);
 
-  interruptRef.current = sendInterrupt;
+  if (!voiceTurn.current) {
+    voiceTurn.current = new VoiceTurnController({
+      onBargeIn: () => sendInterrupt('silero_real_speech'),
+      onUtterance: (audio) => {
+        const pcm16 = floatToPcm16(audio);
+        if (pcm16.byteLength <= 3200 || ws.current?.readyState !== WebSocket.OPEN) {
+          console.warn('[VAD AUDIO] dropped segment', {
+            bytes: pcm16.byteLength,
+            websocketState: ws.current?.readyState,
+            reason: pcm16.byteLength <= 3200 ? 'below_minimum_size' : 'websocket_not_open',
+          });
+          return;
+        }
+        ignoreTts.current = false;
+        responseActive.current = true;
+        setAssistantState('thinking');
+        console.info('[VAD AUDIO] submitting segment', {
+          durationMs: Math.round(audio.length / PCM_SAMPLE_RATE * 1000),
+          pcmBytes: pcm16.byteLength,
+          ...audioSignalStats(audio),
+          assistantPlaying: isPlaying.current,
+          queuedAudioChunks: audioQueue.current.length,
+          at: new Date().toISOString(),
+        });
+        ws.current.send(JSON.stringify({
+          type: 'audio',
+          format: 'pcm_s16le',
+          sample_rate: PCM_SAMPLE_RATE,
+          data: int16ToBase64(pcm16),
+          vad_silence_ms: 650,
+          speech_ms: Math.round(audio.length / PCM_SAMPLE_RATE * 1000),
+        }));
+      },
+    });
+  }
 
   const playNextInQueue = useCallback(async () => {
     if (ignoreTts.current) {
@@ -163,7 +198,7 @@ export function useFridayWebSocket() {
 
     if (audioQueue.current.length === 0) {
       isPlaying.current = false;
-      clearBargeIn();
+      voiceTurn.current?.setAssistantActive(responseActive.current);
       if (turnClock.current.sendAt) {
         feLatency('playback queue empty');
       }
@@ -188,10 +223,8 @@ export function useFridayWebSocket() {
     }
 
     const wasIdle = !isPlaying.current;
-    if (wasIdle) {
-      speakingStartedAt.current = Date.now();
-    }
     isPlaying.current = true;
+    voiceTurn.current?.setAssistantActive(true);
     setAssistantState('speaking');
 
     if (audioContext.current?.state === 'suspended') {
@@ -222,85 +255,6 @@ export function useFridayWebSocket() {
     source.start(0);
   }, [setAssistantState]);
 
-  /** Barge-in: short echo grace, then stop on sustained user speech. */
-  const startBargeInMonitor = useCallback(async () => {
-    clearBargeIn();
-    if (!isMicEnabled.current) return;
-
-    const BARGE_GRACE_MS = 700; // ignore her own voice echo at start of TTS
-    const BARGE_THRESHOLD = 45;
-    const REQUIRED_HITS = 8; // ~400ms sustained user speech before stop (50ms ticks)
-
-    bargeGraceTimer.current = setTimeout(async () => {
-      bargeGraceTimer.current = null;
-      if (!isPlaying.current || !isMicEnabled.current) return;
-
-      try {
-        if (audioContext.current?.state === 'suspended') {
-          await audioContext.current.resume();
-        }
-        if (!audioContext.current) {
-          audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        }
-
-        let stream = mediaStream.current;
-        if (!stream || stream.getAudioTracks().every((t) => t.readyState !== 'live')) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-          mediaStream.current = stream;
-        }
-
-        const sourceNode = audioContext.current.createMediaStreamSource(stream);
-        const analyserNode = audioContext.current.createAnalyser();
-        analyserNode.fftSize = 512;
-        analyserNode.smoothingTimeConstant = 0.5;
-        sourceNode.connect(analyserNode);
-
-        const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
-        let hits = 0;
-
-        bargeInterval.current = setInterval(() => {
-          if (!isPlaying.current || !isMicEnabled.current) {
-            clearBargeIn();
-            return;
-          }
-          if (Date.now() - speakingStartedAt.current < BARGE_GRACE_MS) {
-            hits = 0;
-            return;
-          }
-
-          analyserNode.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          const avg = sum / dataArray.length;
-
-          if (avg > BARGE_THRESHOLD) {
-            hits += 1;
-            if (hits >= REQUIRED_HITS) {
-              console.log('🗣️ Barge-in (avg=', avg.toFixed(1), ')');
-              clearBargeIn();
-              interruptRef.current();
-              setTimeout(() => {
-                if (isMicEnabled.current && !isPlaying.current && !responseActive.current) {
-                  startListeningRef.current();
-                }
-              }, 80);
-            }
-          } else {
-            hits = 0;
-          }
-        }, 50);
-      } catch (err) {
-        console.error('Barge-in monitor failed:', err);
-      }
-    }, BARGE_GRACE_MS);
-  }, []);
-
   useEffect(() => {
     audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     const clientId = 'browser_client_' + Math.floor(Math.random() * 1000);
@@ -328,15 +282,23 @@ export function useFridayWebSocket() {
             console.log('📝 Transcription:', payload);
             ignoreTts.current = false;
             responseActive.current = true;
+            voiceTurn.current?.setAssistantActive(true);
             setAssistantState('thinking');
             break;
           }
 
           case 'interrupted':
+            // A cancellation from the previous turn can arrive after the next
+            // utterance has already been submitted. Do not drop that turn's audio.
+            if (responseActive.current) {
+              console.log('⏭️ Ignoring stale interruption after next turn began');
+              break;
+            }
             console.log('⛔ Backend interrupted:', payload);
             ignoreTts.current = true;
             responseActive.current = false;
             stopPlayback();
+            voiceTurn.current?.setAssistantActive(false);
             break;
 
           case 'ai_text_chunk': {
@@ -387,11 +349,7 @@ export function useFridayWebSocket() {
               }
               if (ignoreTts.current) break;
               audioQueue.current.push(audioBuf);
-              const wasIdle = !isPlaying.current;
-              if (wasIdle) {
-                playNextInQueue();
-                startBargeInMonitor();
-              }
+              if (!isPlaying.current) playNextInQueue();
             } catch (err) {
               console.error('Audio decode error', err);
             }
@@ -403,6 +361,9 @@ export function useFridayWebSocket() {
             console.log('BOT RESPONSE:', payload);
             ignoreTts.current = false;
             responseActive.current = false;
+            voiceTurn.current?.setAssistantActive(
+              isPlaying.current || audioQueue.current.length > 0,
+            );
             // Turn finished — re-arm mic if playback already drained
             if (isMicEnabled.current && !isPlaying.current && audioQueue.current.length === 0) {
               setAssistantState('listening');
@@ -418,6 +379,7 @@ export function useFridayWebSocket() {
           case 'error':
             console.error('WS error payload:', payload);
             responseActive.current = false;
+            voiceTurn.current?.setAssistantActive(false);
             setAssistantState(isMicEnabled.current ? 'listening' : 'idle');
             break;
         }
@@ -434,29 +396,36 @@ export function useFridayWebSocket() {
 
     return () => {
       closed = true;
+      micGeneration.current += 1;
       clearTimeout(reconnectTimeout!);
-      clearVad();
-      clearBargeIn();
-      stopTracks();
+      const vad = myvad.current;
+      myvad.current = null;
+      if (vad) void vad.destroy();
+      voiceTurn.current?.setMicEnabled(false);
+      const stream = mediaStream.current;
+      mediaStream.current = null;
+      stream?.getTracks().forEach((track) => track.stop());
       stopPlayback();
       if (ws.current) ws.current.close();
       if (audioContext.current) audioContext.current.close();
     };
-  }, [playNextInQueue, setAssistantState, startBargeInMonitor, stopPlayback]);
+  }, [playNextInQueue, setAssistantState, stopPlayback]);
 
   const startListening = useCallback(async () => {
+    if (isCapturing.current) return;
+    const generation = ++micGeneration.current;
+    isCapturing.current = true;
+    let stream: MediaStream | null = null;
+    let vad: any = null;
+
     try {
-      if (isCapturing.current) return;
       if (responseActive.current && !isPlaying.current && audioQueue.current.length === 0) {
         responseActive.current = false;
       }
 
       if (isPlaying.current || audioQueue.current.length > 0) {
-        sendInterrupt();
+        sendInterrupt('listen_restart');
       }
-
-      clearVad();
-      clearBargeIn();
 
       if (audioContext.current?.state === 'suspended') {
         await audioContext.current.resume();
@@ -465,67 +434,138 @@ export function useFridayWebSocket() {
         audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
+      if (generation !== micGeneration.current || !isMicEnabled.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (generation === micGeneration.current) isCapturing.current = false;
+        return;
+      }
       mediaStream.current = stream;
+      const activeStream = stream;
 
-      isCapturing.current = true;
       isMicEnabled.current = true;
-      isSpeaking.current = false;
+      voiceTurn.current?.setMicEnabled(true);
       setAssistantState('listening');
       useFridayStore.setState({ isMicActive: true });
       console.log('🎧 Listening (Silero AI VAD)...');
 
-      myvad.current = await MicVAD.new({
-        getStream: async () => stream,
+      vad = await MicVAD.new({
+        getStream: async () => activeStream,
         positiveSpeechThreshold: 0.5,
         redemptionMs: 650,
         baseAssetPath: "/",
         onnxWASMBasePath: "/",
         model: "legacy",
         onSpeechStart: () => {
-          console.log("🗣️ Speech started (Silero)");
-          isSpeaking.current = true;
+          console.info('[VAD] speech_candidate_start', {
+            at: new Date().toISOString(),
+            assistantPlaying: isPlaying.current,
+            responseActive: responseActive.current,
+            queuedAudioChunks: audioQueue.current.length,
+            probabilityWindow: { ...vadProbabilityWindow.current },
+          });
+          voiceTurn.current?.onSpeechStart();
+        },
+        onSpeechRealStart: () => {
+          console.info('[VAD] speech_confirmed', {
+            at: new Date().toISOString(),
+            assistantPlaying: isPlaying.current,
+            responseActive: responseActive.current,
+            queuedAudioChunks: audioQueue.current.length,
+            probabilityWindow: { ...vadProbabilityWindow.current },
+          });
+          voiceTurn.current?.onSpeechRealStart();
         },
         onSpeechEnd: (audio) => {
-          console.log("🔇 Speech ended (Silero). Processing chunk...");
-          isSpeaking.current = false;
-          
-          const pcm16 = floatToPcm16(audio);
-          const bytes = pcm16.byteLength;
-          console.log(`🎙️ PCM slice: ${bytes} bytes`);
-
-          if (bytes > 3200 && ws.current?.readyState === WebSocket.OPEN) {
-            ignoreTts.current = false;
-            responseActive.current = true;
-            setAssistantState('thinking');
-            
-            ws.current.send(
-              JSON.stringify({
-                type: 'audio',
-                format: 'pcm_s16le',
-                sample_rate: 16000,
-                data: int16ToBase64(pcm16),
-                vad_silence_ms: 650,
-              })
-            );
-          } else {
-            console.log('🔇 Slice too small / WS closed — re-arming listen');
-            if (isMicEnabled.current && !isPlaying.current && !responseActive.current) {
-              startListeningRef.current();
-            }
-          }
+          console.info('[VAD] speech_end', {
+            at: new Date().toISOString(),
+            durationMs: Math.round(audio.length / PCM_SAMPLE_RATE * 1000),
+            sampleCount: audio.length,
+            ...audioSignalStats(audio),
+            assistantPlaying: isPlaying.current,
+            responseActive: responseActive.current,
+            queuedAudioChunks: audioQueue.current.length,
+          });
+          voiceTurn.current?.onSpeechEnd(audio);
         },
         onVADMisfire: () => {
-          console.log("❌ VAD misfire (ignored noise)");
-          isSpeaking.current = false;
+          console.info('[VAD] misfire', {
+            at: new Date().toISOString(),
+            assistantPlaying: isPlaying.current,
+            responseActive: responseActive.current,
+            probabilityWindow: { ...vadProbabilityWindow.current },
+          });
+          voiceTurn.current?.onMisfire();
+        },
+        onFrameProcessed: ({ isSpeech }, frame) => {
+          const window = vadProbabilityWindow.current;
+          let sumSquares = 0;
+          for (const sample of frame) sumSquares += sample * sample;
+          window.frames++;
+          window.probabilitySum += isSpeech;
+          window.probabilityPeak = Math.max(window.probabilityPeak, isSpeech);
+          if (isSpeech >= 0.5) window.aboveThreshold++;
+          window.rmsSum += frame.length ? Math.sqrt(sumSquares / frame.length) : 0;
+
+          const elapsedMs = Date.now() - window.startedAt;
+          if (elapsedMs >= 5000) {
+            console.info('[VAD] probability_window', {
+              durationMs: elapsedMs,
+              frames: window.frames,
+              meanSpeechProbability: window.frames
+                ? Number((window.probabilitySum / window.frames).toFixed(3))
+                : 0,
+              peakSpeechProbability: Number(window.probabilityPeak.toFixed(3)),
+              framesAtOrAboveThreshold: window.aboveThreshold,
+              meanFrameRms: window.frames ? Number((window.rmsSum / window.frames).toFixed(4)) : 0,
+              assistantPlaying: isPlaying.current,
+              responseActive: responseActive.current,
+            });
+            vadProbabilityWindow.current = newVadProbabilityWindow();
+          }
         }
       });
-      myvad.current.start();
+      const trackSettings = activeStream.getAudioTracks()[0]?.getSettings();
+      console.info('[VAD] microphone_ready', {
+        at: new Date().toISOString(),
+        sampleRate: trackSettings?.sampleRate,
+        channelCount: trackSettings?.channelCount,
+        echoCancellation: trackSettings?.echoCancellation,
+        noiseSuppression: trackSettings?.noiseSuppression,
+        autoGainControl: trackSettings?.autoGainControl,
+        model: 'legacy',
+        positiveSpeechThreshold: 0.5,
+        redemptionMs: 650,
+      });
+      if (generation !== micGeneration.current || !isMicEnabled.current) {
+        await vad.destroy();
+        stream.getTracks().forEach((track) => track.stop());
+        if (mediaStream.current === stream) mediaStream.current = null;
+        return;
+      }
+      myvad.current = vad;
+      await vad.start();
+      if (generation !== micGeneration.current || !isMicEnabled.current) {
+        if (myvad.current === vad) {
+          myvad.current = null;
+          await vad.destroy();
+        }
+        activeStream.getTracks().forEach((track) => track.stop());
+        if (mediaStream.current === activeStream) mediaStream.current = null;
+      }
 
     } catch (err) {
       console.error('Mic access error:', err);
+      if (generation !== micGeneration.current) return;
+      if (myvad.current === vad) myvad.current = null;
+      if (vad) await vad.destroy().catch(() => undefined);
+      stream?.getTracks().forEach((track) => track.stop());
+      if (mediaStream.current === stream) mediaStream.current = null;
+      if (generation !== micGeneration.current) return;
+      voiceTurn.current?.setMicEnabled(false);
+      isCapturing.current = false;
       isMicEnabled.current = false;
       setAssistantState('idle');
       useFridayStore.setState({ isMicActive: false });
@@ -541,11 +581,16 @@ export function useFridayWebSocket() {
 
     if (isMicEnabled.current) {
       console.log('🎤 Mic OFF');
+      micGeneration.current += 1;
       isMicEnabled.current = false;
-      clearVad();
-      clearBargeIn();
+      voiceTurn.current?.setMicEnabled(false);
       isCapturing.current = false;
-      stopTracks();
+      const vad = myvad.current;
+      myvad.current = null;
+      const stream = mediaStream.current;
+      mediaStream.current = null;
+      if (vad) await vad.destroy();
+      stream?.getTracks().forEach((track) => track.stop());
       useFridayStore.setState({ isMicActive: false });
       setAssistantState('idle');
     } else {
@@ -553,6 +598,7 @@ export function useFridayWebSocket() {
       responseActive.current = false;
       ignoreTts.current = false;
       isMicEnabled.current = true;
+      voiceTurn.current?.setMicEnabled(true);
       await startListening();
     }
   }, [setAssistantState, startListening]);
