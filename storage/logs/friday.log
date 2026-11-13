@@ -1,0 +1,26 @@
+[2026-11-13 12:30:10.146] INFO     app.tools.camera — camera_control action=close
+[2026-11-13 12:30:10.148] INFO     app.tools.camera — camera_control action=photo
+[2026-11-13 12:30:10.152] INFO     app.websocket.connection_manager — Interrupted active turn for client
+[2026-11-13 12:30:10.304] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b)
+[2026-11-13 12:30:10.305] INFO     app.agents.researcher — ResearcherAgent received task: good morning jarvis
+[2026-11-13 12:30:34.760] INFO     app.tools.camera — camera_control action=close
+[2026-11-13 12:30:34.762] INFO     app.tools.camera — camera_control action=photo
+[2026-11-13 12:30:34.767] INFO     app.websocket.connection_manager — Interrupted active turn for client
+[2026-11-13 12:30:34.922] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b)
+[2026-11-13 12:30:34.923] INFO     app.agents.researcher — ResearcherAgent received task: good morning jarvis
+[2026-11-13 12:45:17.519] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b)
+[2026-11-13 12:55:38.136] INFO     app.tools.camera — camera_control action=close
+[2026-11-13 12:55:38.137] INFO     app.tools.camera — camera_control action=photo
+[2026-11-13 12:55:38.142] INFO     app.websocket.connection_manager — Interrupted active turn for client
+[2026-11-13 12:55:38.288] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b) [purpose=research]
+[2026-11-13 12:55:38.290] INFO     app.agents.researcher — ResearcherAgent received task: good morning jarvis
+[2026-11-13 12:55:56.521] INFO     app.tools.camera — camera_control action=close
+[2026-11-13 12:55:56.523] INFO     app.tools.camera — camera_control action=photo
+[2026-11-13 12:55:56.529] INFO     app.websocket.connection_manager — Interrupted active turn for client
+[2026-11-13 12:55:56.680] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b) [purpose=research]
+[2026-11-13 12:55:56.682] INFO     app.agents.researcher — ResearcherAgent received task: good morning jarvis
+[2026-11-13 12:56:12.439] INFO     app.tools.camera — camera_control action=close
+[2026-11-13 12:56:12.441] INFO     app.tools.camera — camera_control action=photo
+[2026-11-13 12:56:12.444] INFO     app.websocket.connection_manager — Interrupted active turn for client
+[2026-11-13 12:56:12.588] INFO     app.llms.factory — Factory → Ollama (llama3.2:1b) [purpose=research]
+[2026-11-13 12:56:12.589] INFO     app.agents.researcher — ResearcherAgent received task: good morning jarvis

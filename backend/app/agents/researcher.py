@@ -10,11 +10,32 @@ from app.tools.search import perform_direct_search
 logger = get_logger(__name__)
 
 
+def _is_conversational_or_unclear(text: str) -> bool:
+    t = (text or "").lower().strip()
+    if not t or len(t.split()) <= 1:
+        return True
+    # Greetings & pleasantries
+    greetings = (
+        "good morning", "good evening", "good afternoon", "good night",
+        "how are you", "who are you", "what are you", "what is your name",
+        "where are you", "can you hear me", "can you keep up",
+        "just greeting", "just greet", "hello", "hey", "hi",
+        "thank you", "thanks", "i just", "just wanted"
+    )
+    if any(g in t for g in greetings):
+        return True
+    # Queries about JARVIS identity or presence
+    if "jarvis" in t or "avis" in t:
+        if any(w in t for w in ("who", "where", "can you", "are you", "chat", "keep up", "tweet", "greet")):
+            return True
+    return False
+
+
 class ResearcherAgent:
     name = "researcher"
 
     def __init__(self) -> None:
-        self.llm = get_llm(temperature=0.3)
+        self.llm = get_llm(temperature=0.3, purpose="research")
 
         self.prompt = PromptTemplate.from_template(
             "You are JARVIS — personal assistant to Tarun Chowdala. Already in the room.\n"
@@ -35,6 +56,13 @@ class ResearcherAgent:
     async def run(self, task: str, context: Dict[str, Any] | None = None) -> Dict[str, Any]:
         context = context or {}
         logger.info("ResearcherAgent received task: %s", task[:80])
+        if _is_conversational_or_unclear(task):
+            return {
+                "agent": self.name,
+                "task": task,
+                "result": "I'm right here, Sir. Could you clarify what you'd like me to search for?",
+                "context_keys": list(context.keys()),
+            }
         try:
             results = await self._search(task, context)
             response = await self.chain.ainvoke({"task": task, "search_results": results})
@@ -69,7 +97,11 @@ class ResearcherAgent:
     async def stream(self, task: str, context: Dict[str, Any] | None = None):
         import random
         logger.info("ResearcherAgent streaming task: %s", task[:80])
-        
+
+        if _is_conversational_or_unclear(task):
+            yield "I'm right here, Sir. Could you clarify what you'd like me to look up?"
+            return
+
         # Yield immediate filler audio to mask latency
         fillers = [
             "Let me look into that, Sir. ",

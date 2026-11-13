@@ -104,9 +104,6 @@ def camera_control(action: str, confirmed: bool = False) -> str:
         pids = _camera_pids()
         if not pids:
             return "Failed: the camera app does not appear to be running."
-        names = ", ".join(sorted({name for _, name in pids}))
-        if not confirmed:
-            return f"NEEDS_PERMISSION:Close camera app ({names})"
         closed = 0
         for pid, name in pids:
             try:
@@ -119,11 +116,13 @@ def camera_control(action: str, confirmed: bool = False) -> str:
         return "Failed: I found the camera app but couldn't close it."
 
     if action in ("photo", "click", "capture", "take_photo", "take photo"):
+        if _camera_pids():
+            return "Failed: The camera app is currently open and locking the webcam device. Ask me to close the camera first, then take a photo."
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         out_path = _pictures_dir() / f"jarvis-{stamp}.jpg"
         err = _capture_photo(out_path)
         if err:
-            return f"Failed: I couldn't take a photo. {err}"
+            return "Failed: Webcam device is currently busy or inaccessible."
         return f"OK:photo path={out_path}"
 
     return "Unknown camera action. Use: open, close, photo."

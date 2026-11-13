@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2:1b"
     GROQ_API_KEY: str | None = None
-    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_CHAT_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_RESEARCH_MODEL: str = "openai/gpt-oss-20b"
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-2.0-flash"
     OPENAI_API_KEY: str | None = None
@@ -47,6 +49,18 @@ class Settings(BaseSettings):
     LOGS_PATH: str = "./storage/logs"
 
     LOG_LEVEL: str = "INFO"
+
+    # JUCCE is opt-in until a native desktop MCP server is installed and verified.
+    JUCCE_ENABLED: bool = False
+    JUCCE_LINUX_COMMAND: str = "computer-use-linux"
+    JUCCE_LINUX_ARGS: str = "mcp"
+    JUCCE_MCP_TIMEOUT_SECONDS: float = 15.0
+
+    # Playwright MCP browser automation settings
+    PLAYWRIGHT_MCP_ENABLED: bool = True
+    PLAYWRIGHT_MCP_COMMAND: str = "npx"
+    PLAYWRIGHT_MCP_ARGS: str = "-y @playwright/mcp@latest"
+    PLAYWRIGHT_MCP_TIMEOUT_SECONDS: float = 30.0
 
     # Secret confirmation code for dangerous actions (spoken by user to approve)
     CONFIRM_CODE: str = "7989"

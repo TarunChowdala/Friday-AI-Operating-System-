@@ -59,6 +59,37 @@ def parse_structured_result(result: str) -> dict[str, Any] | None:
         return None
 
 
+def _sanitize_for_voice(text: str) -> str:
+    """Strip raw JSON, markdown headers, and code fences from text intended for TTS."""
+    if not text:
+        return ""
+    # Strip markdown code blocks
+    s = re.sub(r"```[a-zA-Z0-9_-]*\n[\s\S]*?```", "", text)
+    # Strip markdown inline code
+    s = re.sub(r"`[^`]+`", "", s)
+    # Strip markdown headers like ### Ran Playwright code
+    s = re.sub(r"^#{1,6}\s+.*$", "", s, flags=re.MULTILINE)
+    # Strip bullet lists
+    s = re.sub(r"^\s*[-*]\s+.*$", "", s, flags=re.MULTILINE)
+    # If string is raw JSON, never speak brackets and colons
+    s = s.strip()
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            d = json.loads(s)
+            if isinstance(d, dict):
+                msg = d.get("message") or d.get("error") or ""
+                if "remote desktop portal" in msg.lower() or "denied" in msg.lower():
+                    return "Desktop remote input was denied by the system, Sir."
+                if msg:
+                    return f"Action notice: {msg[:120]}, Sir."
+                if d.get("ok"):
+                    return "Action completed successfully, Sir."
+        except Exception:
+            pass
+        return "Action completed, Sir."
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
     text = (result or "").strip()
     structured = parse_structured_result(text)
@@ -67,6 +98,7 @@ def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
     if not text:
         return "That returned nothing, Sir. I can't confirm it worked."
 
+    # Failure handling
     if is_failure(text):
         cleaned = re.sub(r"\s+", " ", text)
         cleaned = re.sub(
@@ -75,26 +107,115 @@ def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
             cleaned,
             flags=re.I,
         ).strip()
+
+        # JUCCE failure handling
+        if tool_name.startswith("jucce_"):
+            if tool_name == "jucce_get_app_state":
+                if text.startswith("Visible on screen:"):
+                    return text[:280] + ", Sir."
+                return "I inspected the screen, Sir."
+            if "remote desktop portal" in text.lower() or "denied" in text.lower():
+                key = tool_args.get("key", "input")
+                return f"The system denied remote desktop permission for {key}, Sir."
+            if tool_name == "jucce_press_key":
+                return f"I couldn't press {tool_args.get('key', 'that key')}, Sir."
+            if tool_name == "jucce_click":
+                return "I couldn't click on that part of the screen, Sir."
+            if tool_name == "jucce_type_text":
+                return "I couldn't type that text on the desktop, Sir."
+            if tool_name == "jucce_activate_window":
+                return "I couldn't switch to that window, Sir."
+            return "That desktop action couldn't be completed, Sir."
+
+        # Playwright failure handling
+        if tool_name.startswith("playwright_"):
+            if tool_name == "playwright_navigate":
+                return "I couldn't load that webpage, Sir."
+            if tool_name == "playwright_click":
+                return "I couldn't click that element on the webpage, Sir."
+            if tool_name == "playwright_type":
+                return "I couldn't type into that web field, Sir."
+            return "That browser automation action failed, Sir."
+
         action = (tool_args.get("action") or "").lower()
         if tool_name == "media_control" and "pause" in action:
             return (
                 f"I couldn't pause it, Sir. {cleaned}"
-                if cleaned
+                if cleaned and not cleaned.startswith("{")
                 else "I couldn't pause it, Sir."
             )
         if tool_name == "type_text":
             return (
                 f"I couldn't type that, Sir. {cleaned}"
-                if cleaned
+                if cleaned and not cleaned.startswith("{")
                 else "I couldn't type that, Sir."
             )
         if tool_name == "save_document":
             return (
                 f"I couldn't save it, Sir. {cleaned}"
-                if cleaned
+                if cleaned and not cleaned.startswith("{")
                 else "I couldn't save it, Sir."
             )
-        return cleaned[:280] if cleaned else "That didn't work, Sir."
+        sanitized = _sanitize_for_voice(cleaned)
+        return sanitized[:180] if sanitized else "That didn't work, Sir."
+
+    # Playwright MCP Tools (Success)
+    if tool_name.startswith("playwright_"):
+        if tool_name == "playwright_navigate":
+            url = tool_args.get("url") or parse_kv(text).get("url") or ""
+            title = parse_kv(text).get("title") or ""
+            if "youtube" in url.lower() or "youtube" in title.lower():
+                return "Opened YouTube in the browser, Sir."
+            if title:
+                return f"Opened {title}, Sir."
+            return "Opened that webpage for you, Sir."
+        if tool_name == "playwright_click":
+            return "Clicked that on the page, Sir."
+        if tool_name == "playwright_type":
+            return "Typed that into the web page, Sir."
+        if tool_name == "playwright_press_key":
+            return "Sent key to the browser, Sir."
+        if tool_name == "playwright_screenshot":
+            return "Captured a screenshot of the webpage, Sir."
+        if tool_name == "playwright_snapshot":
+            title_m = re.search(r"Page Title:\s*([^\n\r]+)", text)
+            if title_m:
+                return f"Inspected page: {title_m.group(1).strip()}, Sir."
+            return "I've inspected the webpage content, Sir."
+        if tool_name == "playwright_custom_action":
+            return "Browser action completed, Sir."
+
+    # JUCCE Tools (Success)
+    if tool_name.startswith("jucce_"):
+        if tool_name == "jucce_press_key":
+            return f"Pressed {tool_args.get('key', 'key')}, Sir."
+        if tool_name == "jucce_click":
+            return "Clicked on the screen, Sir."
+        if tool_name == "jucce_type_text":
+            return "Typed that out for you, Sir."
+        if tool_name == "jucce_activate_window":
+            return "Switched to that window, Sir."
+        if tool_name == "jucce_scroll":
+            return "Scrolled the view, Sir."
+        if tool_name == "jucce_screenshot":
+            return "Captured desktop screenshot, Sir."
+        if tool_name == "jucce_get_app_state":
+            if text.startswith("Visible on screen:"):
+                return text[:280] + ", Sir."
+            return "Inspected the application state, Sir."
+        if tool_name == "jucce_perform_action":
+            return "Desktop action completed, Sir."
+        if tool_name == "jucce_observe_desktop":
+            if text.startswith("{"):
+                try:
+                    d = json.loads(text)
+                    if "windows" in d:
+                        wins = [w.get("title") or w.get("app_id") for w in d["windows"] if isinstance(w, dict)]
+                        return f"Open windows: {', '.join(wins[:4])}, Sir."
+                except Exception:
+                    pass
+            sanitized = _sanitize_for_voice(text)
+            return sanitized[:250] if sanitized else "Desktop observation completed, Sir."
 
     if tool_name == "media_control":
         action = (tool_args.get("action") or "").lower()
@@ -132,6 +253,9 @@ def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
         return text[:200]
 
     if tool_name == "open_url":
+        url = tool_args.get("url") or ""
+        if "newtab" in url or "about:blank" in url:
+            return "Opened a new tab, Sir."
         return "Opened that link, Sir."
 
     if tool_name == "search_google":
@@ -157,9 +281,9 @@ def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
         "clipboard_control",
         "capture_screen_and_analyze",
     ):
-        return text[:400]
+        return _sanitize_for_voice(text)[:400]
 
-    return text[:200]
+    return _sanitize_for_voice(text)[:200]
 
 
 def recover_tool_from_error(err: str) -> tuple[str, dict] | None:

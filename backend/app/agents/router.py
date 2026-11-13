@@ -13,9 +13,7 @@ from app.core.llm import get_llm
 from app.agents.coder import CoderAgent
 from app.agents.critic import CriticAgent
 from app.agents.browser_executor import BrowserExecutorAgent
-from app.agents.desktop_context_executor import DesktopContextExecutorAgent
 from app.agents.desktop_executor import DesktopExecutorAgent
-from app.agents.media_executor import MediaExecutorAgent
 from app.agents.planner import PlannerAgent
 from app.agents.researcher import ResearcherAgent
 from app.agents.system_executor import SystemExecutorAgent
@@ -56,6 +54,17 @@ _GREETING_RE = re.compile(
     r"(?:\s+\w+){0,3}\s*[.!]?\s*$",
     re.I,
 )
+_CONVERSATIONAL_RE = re.compile(
+    r"\b("
+    r"hi|hello|hey|good morning|good evening|good afternoon|good night|"
+    r"how are you|how'?s it going|what'?s up|who are you|what are you|what is your name|"
+    r"where are you|where'?s jarvis|where'?s avis|are you there|are you online|can you hear me|can you keep up|"
+    r"thanks|thank you|you'?re welcome|appreciate it|"
+    r"just greet\w*|just saying hi|just chatting|no problem|"
+    r"i didn'?t ask|i was just saying|i am just|i just greet\w*|just tweet\w*"
+    r")\b",
+    re.I,
+)
 _CODE_RE = re.compile(
     r"\b(code|refactor|debug|function|typescript|python|bug|compile)\b", re.I
 )
@@ -91,11 +100,12 @@ _CAMERA_RE = re.compile(
 _DESKTOP_CONTEXT_RE = re.compile(
     r"\b("
     r"what app am i in|which app am i in|current window|focused window|focused app|"
-    r"what('?s| is) open|open windows|list windows|what('?s| is) running|running apps|running processes|"
+    r"what('?s| is| are) open|open windows|windows (are )?open|list windows|what.{0,25}windows.{0,25}open|"
+    r"what('?s| is) running|running apps|running processes|"
     r"what.{0,40}(apps?|processes) .{0,20}running|apps? .{0,20}running|"
-    r"is \w[\w-]* running|\w[\w-]* is running|"
-    r"what('?s| is) playing|is .+ open|is .+ running"
-    r")\b",
+    r"what('?s| is) playing"
+    r")\b|"
+    r"^\s*is\s+[\w\s-]+\s+(open|running)\s*\??$",
     re.I,
 )
 
@@ -106,13 +116,10 @@ def _deterministic_route(task: str) -> Optional[str]:
     if not t:
         return "planner"
 
-    if _GREETING_RE.match(t):
-        return "planner"
-
-    # Desktop / browser *actions* beat pure research
-    if _DESKTOP_CONTEXT_RE.search(t):
-        return "desktop_context_executor"
+    # Action commands take priority over conversational prefixes (e.g. "yeah open camera", "ok list windows")
     if _CAMERA_RE.search(t):
+        return "desktop_executor"
+    if _DESKTOP_CONTEXT_RE.search(t):
         return "desktop_executor"
     if _FILE_RE.search(t):
         return "system_executor"
@@ -125,17 +132,25 @@ def _deterministic_route(task: str) -> Optional[str]:
     if re.search(r"\b(save)\b.*\b(it|file|document|notepad)\b", t, re.I):
         return "desktop_executor"
     if _MEDIA_RE.search(t):
-        return "media_executor"
+        return "desktop_executor"
     if re.search(r"\b(focus|switch to|close|quit|kill process)\b", t, re.I):
         return "desktop_executor"
     if re.search(r"\b(open|launch)\b.+\b(chrome|youtube|browser)\b", t, re.I):
+        return "browser_executor"
+    if re.search(r"\b(new tab|open.*tab|another tab|close tab|switch tab)\b", t, re.I):
         return "browser_executor"
     if _APP_LAUNCH_RE.search(t) or _DESKTOP_RE.search(t):
         return "desktop_executor"
     if _SYSTEM_RE.search(t):
         return "system_executor"
 
-    # Pure info / news (no chrome/open action)
+    # Conversational greetings, pleasantries, or questions about Jarvis (no action commands)
+    if _CONVERSATIONAL_RE.search(t) and not _EXEC_RE.search(t):
+        return "planner"
+    if _GREETING_RE.match(t):
+        return "planner"
+
+    # Pure info / news (explicit search queries)
     if _RESEARCH_RE.search(t) and not _EXEC_RE.search(t):
         return "researcher"
     if re.search(r"\b(what is|who is|when did|how many)\b", t, re.I) and _RESEARCH_RE.search(t):
@@ -151,7 +166,7 @@ def _deterministic_route(task: str) -> Optional[str]:
         re.I,
     ):
         if re.match(r"^\s*(play|pause|resume|mute|unmute)\b", t, re.I):
-            return "media_executor"
+            return "desktop_executor"
         if re.match(r"^\s*(type|write|save)\b", t, re.I):
             return "desktop_executor"
         return "desktop_executor"
@@ -169,28 +184,28 @@ class AgentRouter:
             "coder": CoderAgent(),
             "system_executor": SystemExecutorAgent(),
             "browser_executor": BrowserExecutorAgent(),
-            "media_executor": MediaExecutorAgent(),
             "desktop_executor": DesktopExecutorAgent(),
-            "desktop_context_executor": DesktopContextExecutorAgent(),
             "critic": CriticAgent(),
         }
 
+        # Aliases for backwards compatibility with previous agent names
+        self.agents["desktop_context_executor"] = self.agents["desktop_executor"]
+        self.agents["media_executor"] = self.agents["desktop_executor"]
+
         prompt = PromptTemplate.from_template(
             "You are the central routing brain for JARVIS.\n"
-            "Pick ONE agent for the user task.\n\n"
+            "Analyze the USER INTENT and pick exactly ONE agent.\n\n"
             "Rules:\n"
-            "- planner: casual chat, greetings, opinions, clarification, 'what did you open?' without a new action.\n"
-            "- system_executor: terminal commands, delete/list files in Downloads/Desktop, system status, ram/cpu/disk/cache, volume, maintenance/cleanup.\n"
-            "- browser_executor: open URLs, search in chrome/browser/google, play YouTube, browser follow-ups like 'open the same in chrome'.\n"
-            "- media_executor: pause/play/resume/next/previous/mute/unmute active media.\n"
-            "- desktop_executor: open desktop apps, write/type/save in notepad/editor, clipboard, screenshot/screen analysis, focus windows, close apps/windows, kill a process, open/close camera, take a photo.\n"
-            "- desktop_context_executor: read-only desktop awareness like current window, open windows, running apps, and what's playing.\n"
-            "- researcher: factual/news questions answered by web search (NOT opening Chrome).\n"
-            "- coder: writing/debugging code.\n"
+            "- planner: DEFAULT AGENT for conversation, greetings ('good morning', 'hi', 'hey'), small talk, questions about JARVIS or its capabilities ('who are you', 'can you keep up with chat'), general opinions, chit-chat, unclear/vague statements, or when the user is simply talking without asking for an external action. When in doubt, ALWAYS pick planner.\n"
+            "- desktop_executor: open desktop apps ('open camera', 'open notepad'), desktop windows ('what windows are open', 'what app am I in'), screen state, typing in editor, clicking, media playback ('pause', 'play', 'mute').\n"
+            "- browser_executor: ONLY when the user EXPLICITLY asks to open a website, browse web pages, or search in Google/Chrome/YouTube ('search for X in Chrome', 'open youtube', 'go to github.com'). NEVER use for casual comments, greetings, or unclear words.\n"
+            "- system_executor: terminal/shell commands ('run command ls', 'delete file'), system stats ('RAM usage', 'disk space', 'CPU', 'volume').\n"
+            "- researcher: ONLY for EXPLICIT factual/informational queries requiring a live internet search ('search the web for X', 'what is the latest news on X', 'who won the match today', 'current price of bitcoin'). NEVER use researcher for questions about JARVIS, conversational chat, or ambiguous statements.\n"
+            "- coder: writing or debugging code.\n"
             "- critic: code review only.\n\n"
             "Recent context (may be empty):\n{context}\n\n"
             "Task: {task}\n\n"
-            "Respond with exactly ONE word: planner|system_executor|browser_executor|media_executor|desktop_executor|desktop_context_executor|researcher|coder|critic"
+            "Respond with exactly ONE word: planner|system_executor|browser_executor|desktop_executor|researcher|coder|critic"
         )
         self.router_chain = prompt | self.llm | StrOutputParser()
 

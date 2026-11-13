@@ -59,4 +59,17 @@ async def on_startup() -> None:
 
 async def on_shutdown() -> None:
     logger.info("JARVIS backend shutting down")
+    try:
+        from app.tools.jucce.tools import close_jucce
+
+        close_jucce()
+    except Exception as e:
+        logger.debug("JUCCE shutdown cleanup skipped: %s", e)
+
+    try:
+        from app.tools.playwright_mcp import close_playwright_mcp
+
+        close_playwright_mcp()
+    except Exception as e:
+        logger.debug("Playwright MCP shutdown cleanup skipped: %s", e)
     await close_redis()
