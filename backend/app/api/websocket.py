@@ -178,6 +178,8 @@ async def _handle_turn(
         router_ctx = {
             "recent_messages": live.get("messages") or [],
             "focused": live.get("focused_target"),
+            "browser_state": live.get("browser_state") or {},
+            "desktop_state": live.get("desktop_state") or {},
         }
         router_start = time.time()
         logger.info("Routing task to AI: %s", user_text)

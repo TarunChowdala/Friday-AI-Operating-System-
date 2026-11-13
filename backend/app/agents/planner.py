@@ -61,4 +61,19 @@ class PlannerAgent:
             logger.info("⏱️ [LATENCY] Planner stream total: %.3fs", time.time() - t0)
         except Exception as e:
             logger.error("PlannerAgent stream failed: %s", e)
-            yield "I encountered an error."
+            try:
+                from app.llms.factory import _make_ollama
+                backup = _make_ollama(temperature=0.7, purpose="default")
+                async for chunk in backup.astream(messages):
+                    piece = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if isinstance(piece, list):
+                        piece = "".join(
+                            p if isinstance(p, str) else p.get("text", "") 
+                            for p in piece if isinstance(p, (str, dict))
+                        )
+                    if piece:
+                        yield piece
+                return
+            except Exception as e2:
+                logger.error("Planner emergency fallback failed: %s", e2)
+            yield "I'm having trouble with the connection right now, Sir."

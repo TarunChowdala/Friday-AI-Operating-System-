@@ -67,8 +67,7 @@ _BUILDERS = {
 def get_llm(purpose: str = "default", temperature: float = 0.7) -> Any:
     """
     Return a chat model for the configured LLM_PROVIDER.
-    - purpose='research' or 'coder' uses the deep reasoning model (e.g. openai/gpt-oss-20b).
-    - purpose='planner', 'chat', 'router', 'default' uses the fast conversational model (e.g. llama-3.3-70b-versatile).
+    Configured with automatic fallbacks so 429 rate limits seamlessly fall back to secondary models.
     """
     cfg = get_settings()
     provider = (cfg.LLM_PROVIDER or "ollama").strip().lower()
@@ -76,8 +75,46 @@ def get_llm(purpose: str = "default", temperature: float = 0.7) -> Any:
         logger.warning("Unknown LLM_PROVIDER=%r — falling back to ollama", provider)
         provider = "ollama"
 
+    fallbacks: list[Any] = []
+
+    if provider == "groq" and cfg.GROQ_API_KEY:
+        # Fallback 1: Alternative Groq model (separate daily token quota)
+        try:
+            alt_model = (
+                cfg.GROQ_RESEARCH_MODEL
+                if purpose not in ("research", "coder")
+                else cfg.GROQ_CHAT_MODEL
+            )
+            if alt_model and alt_model != (cfg.GROQ_CHAT_MODEL if purpose not in ("research", "coder") else cfg.GROQ_RESEARCH_MODEL):
+                from langchain_groq import ChatGroq
+                fallbacks.append(
+                    ChatGroq(
+                        model=alt_model,
+                        groq_api_key=cfg.GROQ_API_KEY,
+                        temperature=temperature,
+                    )
+                )
+        except Exception as e:
+            logger.debug("Could not add Groq alt fallback: %s", e)
+
+        # Fallback 2: Gemini if key available
+        if cfg.GEMINI_API_KEY:
+            try:
+                fallbacks.append(_make_gemini(temperature, purpose=purpose))
+            except Exception as e:
+                logger.debug("Could not add Gemini fallback: %s", e)
+
+        # Fallback 3: Local Ollama (unlimited local fallback)
+        try:
+            fallbacks.append(_make_ollama(temperature, purpose=purpose))
+        except Exception as e:
+            logger.debug("Could not add Ollama fallback: %s", e)
+
     try:
-        return _BUILDERS[provider](temperature, purpose=purpose)
+        primary = _BUILDERS[provider](temperature, purpose=purpose)
+        if fallbacks:
+            return primary.with_fallbacks(fallbacks)
+        return primary
     except Exception as e:
         if provider == "ollama":
             raise

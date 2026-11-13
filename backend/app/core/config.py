@@ -1,7 +1,8 @@
 """Application settings loaded from environment."""
 from functools import lru_cache
-from typing import List
+from typing import Any, List
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,13 @@ class Settings(BaseSettings):
     APP_NAME: str = "JARVIS AI"
     APP_VERSION: str = "4.2.1"
     DEBUG: bool = True
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug(cls, v: Any) -> bool:
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "debug", "on")
+        return bool(v)
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
@@ -22,9 +30,9 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2:1b"
     GROQ_API_KEY: str | None = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_CHAT_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_RESEARCH_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_CHAT_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_RESEARCH_MODEL: str = "openai/gpt-oss-120b"
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-2.0-flash"
     OPENAI_API_KEY: str | None = None

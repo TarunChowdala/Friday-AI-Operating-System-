@@ -408,17 +408,15 @@ class SessionManager:
         return f"{hello} I'm online."
 
     def to_langchain_messages(self, data: dict[str, Any]) -> list[BaseMessage]:
-        """Build LLM context from live Redis session (chat + workspace + episodic)."""
-        summary = (data.get("summary") or "").strip()
+        """Build LLM context from live Redis session (chat + active window)."""
         system = JARVIS_SYSTEM_PROMPT
-        if summary:
-            system += f"\n\nHere is a summary of the earlier conversation:\n{summary}"
-
-        system += f"\n\n{self.format_episodic_context(data)}"
-        system += f"\n\n{self.format_workspace_context(data)}"
+        focused = data.get("focused_target") or {}
+        if focused and (focused.get("title_hint") or focused.get("name")):
+            system += f"\n\nActive Window: {focused.get('title_hint') or focused.get('name')}"
 
         messages: list[BaseMessage] = [SystemMessage(content=system)]
-        for m in data.get("messages") or []:
+        raw_msgs = data.get("messages") or []
+        for m in raw_msgs[-8:]:
             role = m.get("role")
             content = m.get("content") or ""
             if role == "user":

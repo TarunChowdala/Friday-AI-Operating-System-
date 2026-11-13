@@ -42,9 +42,8 @@ _SEARCH_IN_BROWSER_RE = re.compile(
 )
 _RESEARCH_RE = re.compile(
     r"\b("
-    r"news|latest|today'?s|current|who won|stock price|weather|"
-    r"what(?:'s| is) happening|look up|search for|find out|"
-    r"recent (news|updates)|cricket|bcci"
+    r"latest (news|updates)|today'?s news|who won the|stock price of|weather in|"
+    r"cricket score|bcci|search the web for|google search for|who is the prime minister|who is the president"
     r")\b",
     re.I,
 )
@@ -58,6 +57,8 @@ _CONVERSATIONAL_RE = re.compile(
     r"\b("
     r"hi|hello|hey|good morning|good evening|good afternoon|good night|"
     r"how are you|how'?s it going|what'?s up|who are you|what are you|what is your name|"
+    r"what did i (just )?(say|said|ask|asked|tell|told)|what was that|repeat that|say that again|"
+    r"what do you mean|what does that mean|why did you|what contacts me|"
     r"where are you|where'?s jarvis|where'?s avis|are you there|are you online|can you hear me|can you keep up|"
     r"thanks|thank you|you'?re welcome|appreciate it|"
     r"just greet\w*|just saying hi|just chatting|no problem|"
@@ -150,10 +151,8 @@ def _deterministic_route(task: str) -> Optional[str]:
     if _GREETING_RE.match(t):
         return "planner"
 
-    # Pure info / news (explicit search queries)
+    # Explicit external news / internet research only
     if _RESEARCH_RE.search(t) and not _EXEC_RE.search(t):
-        return "researcher"
-    if re.search(r"\b(what is|who is|when did|how many)\b", t, re.I) and _RESEARCH_RE.search(t):
         return "researcher"
 
     if _CODE_RE.search(t) and not _EXEC_RE.search(t):
@@ -193,19 +192,16 @@ class AgentRouter:
         self.agents["media_executor"] = self.agents["desktop_executor"]
 
         prompt = PromptTemplate.from_template(
-            "You are the central routing brain for JARVIS.\n"
-            "Analyze the USER INTENT and pick exactly ONE agent.\n\n"
-            "Rules:\n"
-            "- planner: DEFAULT AGENT for conversation, greetings ('good morning', 'hi', 'hey'), small talk, questions about JARVIS or its capabilities ('who are you', 'can you keep up with chat'), general opinions, chit-chat, unclear/vague statements, or when the user is simply talking without asking for an external action. When in doubt, ALWAYS pick planner.\n"
-            "- desktop_executor: open desktop apps ('open camera', 'open notepad'), desktop windows ('what windows are open', 'what app am I in'), screen state, typing in editor, clicking, media playback ('pause', 'play', 'mute').\n"
-            "- browser_executor: ONLY when the user EXPLICITLY asks to open a website, browse web pages, or search in Google/Chrome/YouTube ('search for X in Chrome', 'open youtube', 'go to github.com'). NEVER use for casual comments, greetings, or unclear words.\n"
-            "- system_executor: terminal/shell commands ('run command ls', 'delete file'), system stats ('RAM usage', 'disk space', 'CPU', 'volume').\n"
-            "- researcher: ONLY for EXPLICIT factual/informational queries requiring a live internet search ('search the web for X', 'what is the latest news on X', 'who won the match today', 'current price of bitcoin'). NEVER use researcher for questions about JARVIS, conversational chat, or ambiguous statements.\n"
-            "- coder: writing or debugging code.\n"
-            "- critic: code review only.\n\n"
-            "Recent context (may be empty):\n{context}\n\n"
+            "You are JARVIS's intent router. Classify the USER TASK into exactly ONE category:\n"
+            "- browser_executor: Open a website, navigate the web, or interact with an active webpage.\n"
+            "- desktop_executor: Local OS windows, desktop apps, media playback, camera.\n"
+            "- system_executor: Terminal/shell commands, system resource stats (RAM, CPU, disk, volume).\n"
+            "- researcher: External web research for news, facts, people, companies, and follow-ups.\n"
+            "- coder: Writing or debugging programming code.\n"
+            "- planner: General conversation, greetings, meta-questions ('what did I say'), or tasks needing clarification.\n\n"
+            "Recent Chat:\n{context}\n\n"
             "Task: {task}\n\n"
-            "Respond with exactly ONE word: planner|system_executor|browser_executor|desktop_executor|researcher|coder|critic"
+            "Respond with ONE word only: planner|browser_executor|desktop_executor|system_executor|researcher|coder|critic"
         )
         self.router_chain = prompt | self.llm | StrOutputParser()
 
@@ -221,17 +217,11 @@ class AgentRouter:
 
         context_bits: list[str] = []
         if context:
-            for m in (context.get("recent_messages") or [])[-6:]:
+            for m in (context.get("recent_messages") or [])[-3:]:
                 role = m.get("role", "")
-                content = (m.get("content") or "")[:120]
+                content = (m.get("content") or "").replace("\n", " ")[:100]
                 if content:
                     context_bits.append(f"{role}: {content}")
-            focused = context.get("focused") or {}
-            if focused:
-                context_bits.append(
-                    f"focused: {focused.get('kind')}/{focused.get('name')} "
-                    f"q={focused.get('query') or '-'}"
-                )
         ctx = "\n".join(context_bits) if context_bits else "(none)"
 
         try:

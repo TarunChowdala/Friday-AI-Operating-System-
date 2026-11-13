@@ -27,6 +27,8 @@ class ResearcherGuardTests(unittest.IsolatedAsyncioTestCase):
             "cricket world cup winner 2023",
             "who is the prime minister of Canada",
             "weather forecast for Hyderabad tomorrow",
+            "Yeah, yeah, what happened exactly? I just wanted to know.",
+            "I just want to know what happened to that company",
         ]
         for q in real_queries:
             with self.subTest(query=q):

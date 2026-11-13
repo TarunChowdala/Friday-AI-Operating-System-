@@ -178,6 +178,17 @@ def voice_line(tool_name: str, tool_args: dict, result: str) -> str:
         if tool_name == "playwright_screenshot":
             return "Captured a screenshot of the webpage, Sir."
         if tool_name == "playwright_snapshot":
+            items = []
+            for line in text.splitlines():
+                line_s = line.strip()
+                m = re.search(r'[-*]\s+(?:\[[^\]]+\]\s+)?["\']?([^"\']{2,40})["\']?', line_s)
+                if m and not any(skip in line_s.lower() for skip in ("page url", "console", "snapshot", "button", "link", "heading")):
+                    candidate = m.group(1).strip()
+                    if len(candidate) > 2 and candidate not in items:
+                        items.append(candidate)
+            unique_items = items[:5]
+            if unique_items:
+                return "Visible on the page: " + ", ".join(unique_items) + ", Sir."
             title_m = re.search(r"Page Title:\s*([^\n\r]+)", text)
             if title_m:
                 return f"Inspected page: {title_m.group(1).strip()}, Sir."
@@ -539,18 +550,14 @@ class ToolExecutorMixin:
                 workspace = session_manager.format_workspace_context(data)
                 msgs = data.get("messages") or []
                 bits = []
-                for m in msgs[-8:]:
+                for m in msgs[-3:]:
                     role = m.get("role", "")
                     content = (m.get("content") or "").strip().replace("\n", " ")
                     if content:
-                        bits.append(f"{role}: {content[:160]}")
+                        bits.append(f"{role}: {content[:100]}")
                 recent_chat = "\n".join(bits)
                 state = data.get("current_state") or {}
-                last_research = (
-                    state.get("last_research_query")
-                    or (data.get("browser_state") or {}).get("youtube", {}).get("query")
-                    or ""
-                )
+                last_research = state.get("last_research_query") or ""
             except Exception as e:
                 logger.warning("Executor context unavailable: %s", e)
 

@@ -51,6 +51,19 @@ class RouterDeterministicTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(_deterministic_route(query), "researcher")
 
+    def test_in_app_and_ambiguous_queries_fall_through_to_llm(self):
+        # These should NEVER be hardcoded to researcher; they need LLM context!
+        queries = [
+            "Search for a contact which names me",
+            "Search for contact",
+            "Yeah, search for contact, M-E, me",
+            "How many tabs are opened in this current chrome?",
+            "which contacts you can see in this WhatsApp",
+        ]
+        for query in queries:
+            with self.subTest(query=query):
+                self.assertNotEqual(_deterministic_route(query), "researcher")
+
 
 if __name__ == "__main__":
     unittest.main()

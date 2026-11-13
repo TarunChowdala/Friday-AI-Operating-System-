@@ -1,55 +1,32 @@
-"""Browser executor — open URLs, search Google, play YouTube, and full web automation via Playwright MCP."""
+"""Browser executor — general web browsing and in-page automation."""
 from app.agents.executor_common import ToolExecutorMixin
 from app.tools.system_controls import open_url, search_google, play_youtube
 
-_BROWSER_EXECUTOR_PROMPT = """You are JARVIS's browser controller for Tarun (call him Sir only when natural).
+_BROWSER_PROMPT = """You are JARVIS's browser controller for Tarun (Sir).
+Understand the user's intent and pick the appropriate tool:
 
-Call exactly ONE tool via the API tool-calling interface.
-Never put JSON inside the tool name.
-Do NOT claim success in plain text — tools return the real outcome.
+Tools:
+- open_url(url="..."): Open a requested website or URL.
+- search_google(query="..."): Search Google on the web.
+- play_youtube(query="..."): Play a video or music.
 
-Workspace awareness:
-- Use WORKSPACE STATE and RECENT CHAT below.
-- NEVER execute search_google or open_url for greetings, small talk, casual statements ('I just greeted you'), or unclear remarks. Only search or open when the user explicitly asks you to open a site or search.
-- "open/search … in chrome" or "open the same/that news" → search_google (preferred) or open_url.
-- For "same/that", use LAST RESEARCH TOPIC / recent chat — NEVER bare news.google.com unless he asked for the Google News home page.
-- Prefer search_google with a concrete query over a generic portal.
+In-page tools (for interacting with the currently open webpage):
+- playwright_snapshot(): Read or inspect what elements/text are on the active page.
+- playwright_click(selector="..."): Click an element, button, or link.
+- playwright_type(selector="...", text="..."): Type text into an input or textbox.
+- playwright_press_key(key="Enter"): Press a keyboard key.
 
-Tool picks:
-- open link → open_url
-- google/chrome search → search_google
-- play YouTube → play_youtube
-"""
-
-_PLAYWRIGHT_BROWSER_PROMPT = """You are JARVIS's comprehensive web browser controller for Tarun (call him Sir only when natural).
-
-Call exactly ONE tool per turn via the API tool-calling interface.
-Never put JSON inside the tool name.
-Do NOT claim success in plain text — tools return the real outcome.
-
-## PRIMARY: Desktop Browser Tools (ALWAYS use these for general browsing, opening links, and YouTube)
-- open YouTube / play video        → play_youtube(query="...")
-- open any URL or website / Chrome → open_url(url="...")
-- open a new tab in browser        → open_url(url="about:blank")
-- search Google                    → search_google(query="...")
-
-## SECONDARY: Playwright MCP Tools (ONLY for deep web automation, scraping, or web interaction)
-- click on a page element          → playwright_click(selector="text=Submit" or selector="#id")
-- type into a web input field      → playwright_type(selector="input[name='q']", text="...")
-- read/inspect web page content    → playwright_snapshot()
-- press key in web page            → playwright_press_key(key="Enter")
-- take screenshot of web page      → playwright_screenshot()
-- navigate in automated session    → playwright_navigate(url="...") [ONLY when doing automated scraping or form filling]
-
-CRITICAL RULES:
-- When the user asks to "open YouTube", "open Chrome", "open website X", or "open a tab", ALWAYS use play_youtube or open_url. DO NOT use playwright_navigate for simple desktop link opening.
-- NEVER call search_google or open_url for greetings, small talk, casual statements ('I just greeted you'), or unclear remarks.
+RULES:
+1. Understand the user's request and open the site or URL they want.
+2. NEVER guess a random site or open a site unprompted. If the user's request is ambiguous or you do not know what site they want, DO NOT call open_url — reply in plain text asking for clarification.
+3. For general conversation or meta-questions, do NOT call any tool — reply in plain text.
+Call at most ONE tool per turn.
 """
 
 
 class BrowserExecutorAgent(ToolExecutorMixin):
     name = "browser_executor"
-    system_prompt = _BROWSER_EXECUTOR_PROMPT
+    system_prompt = _BROWSER_PROMPT
     tools = [open_url, search_google, play_youtube]
 
     def __init__(self) -> None:
@@ -64,7 +41,5 @@ class BrowserExecutorAgent(ToolExecutorMixin):
                 play_youtube,
                 *ALL_PLAYWRIGHT_TOOLS,
             ]
-            self.system_prompt = _PLAYWRIGHT_BROWSER_PROMPT
 
         super().__init__()
-
